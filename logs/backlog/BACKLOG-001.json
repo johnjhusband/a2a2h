@@ -1,0 +1,24 @@
+{
+  "id": "BACKLOG-001",
+  "timestamp": "2026-05-25T03:00:00Z",
+  "type": "security",
+  "priority": "P1",
+  "status": "open",
+  "surfaced_by": "john",
+  "surfaced_from": "Claude Code session 2026-05-25 — repo flipped public same day as initial extraction from upstream CTO project; pre-flip audit only checked current state for obvious secret patterns.",
+  "affects": "whole repo + the running deployment whose attack surface is now public",
+  "capability_needed": "Thorough security audit of the public A2A2H repo and any deployment running it",
+  "details": "Pre-flip scan (sk-or-v1-, sk-proj-, gho_, KA2Ru-, Telegram bot token shape) returned zero matches against `git log --all -p`. That covered current text in master only, not binary blobs, deleted files in earlier commits, reflog, tags, or other refs. A thorough audit should cover (1) full history of every ref using gitleaks/trufflehog, including reachable-via-reflog blobs, (2) binary content scans (the repo doesn't ship a chat.db or .vapid/* but the source backend writes those — verify no committed prototype copies exist), (3) personal-data scan: 2 references to husband.llc emails in the initial extraction's docstrings + the PWA frontend's hardcoded chat placeholder. Some of those should probably be parameterized out before the repo gets wider attention. (4) Dependency audit: services use only Python stdlib + Caddy + optional pywebpush; no requirements.txt yet, no package-lock. Document the minimal dep set + their known CVEs. (5) Bridge attack surface: PWA backend binds 127.0.0.1:8088 (good — Caddy fronts it). Hermes sidecar binds 127.0.0.1:8643 (good). Confirm no service quietly binds to 0.0.0.0. The Caddyfile is in the repo — verify it doesn't reveal credential file paths. (6) Future-commit discipline: write a pre-commit hook (or rely on GitHub push protection once enabled) that catches an accidental env-var paste. With the upstream CTO deployment using HERMES_YOLO_MODE autonomous agents, any future autonomous commit needs to go through the same gate.",
+  "search_trail": [
+    "Initial extraction 2026-05-25 from CTO repo: services/pwa, services/chat, services/hermes_a2a_sidecar, services/a2a_delegate, plus scripts/cache-keepalive.sh and the systemd units (renamed cto-* → a2a2h-*).",
+    "Pre-flip grep across the new repo's single commit history matched secret-shaped patterns: 0 hits.",
+    "Personal data scan: 2 references to husband.llc emails (in docstrings/comments), several `/opt/cto/` hardcoded paths."
+  ],
+  "proposed_resolution": "Run gitleaks against the full repo history, enable GitHub secret scanning + push protection + Dependabot, write a CONTRIBUTING-SECURITY.md documenting the threat model, parameterize the few CTO-specific identifiers (paths, emails, session ids) so deployments can configure them without forking. If anything is found, decide between filter-repo rewrite vs accept-and-rotate.",
+  "blast_radius": "If a credential leaks: rotate that credential in the deployment that uses it (HERMES_API_SERVER_KEY, PWA_AUTH_TOKEN, HERMES_A2A_TOKEN, the VAPID Web Push private key). The repo itself has no embedded secrets — but the deployment recipe could leak something if install scripts are added later that hardcode values.",
+  "rollback_plan": "Flip the repo back to private until the audit is clean. (Existing forks remain forked; nothing recalls the public exposure window, but limiting forward exposure is straightforward.)",
+  "john_review_date": "2026-05-25",
+  "resolution_date": null,
+  "resolution_notes": null,
+  "related_decision_log": null
+}
