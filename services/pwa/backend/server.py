@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""
+PWA backend — bridges the browser to OpenClaw and Hermes.
+
+Serves the PWA frontend at /, plus a JSON API:
+
+  GET  /api/messages?since_id=N  → message history
+  POST /api/messages              → send message from John (routes by @-mention)
+  GET  /api/stream                → Server-Sent Events stream of new messages
+  POST /api/push/subscribe        → register browser for Web Push (subscription stored)
+  GET  /api/push/vapid_public_key → return server's VAPID public key
+  GET  /api/health                → health check
+
+Auth: Bearer token in Authorization header. Token is `PWA_AUTH_TOKEN` set at
+install time. On first visit, browser receives the token via URL query, saves
+to localStorage, strips from URL, and sends in subsequent Authorization
+headers.
+
+Routing of John's outbound messages:
+  - Starts with "@hermes " (case-insensitive) → POST to Hermes A2A sidecar
+  - Starts with "@openclaw " or no @-mention → run the real OpenClaw agent via
+    the OpenClaw gateway-backed CLI session (not a raw model/capability fallback)
+
+Implementation: pure stdlib http.server + threading. SSE via long-running
+generator response. Push notifications stored as DB rows for now (sending push
+requires a small library — wired via `pywebpush` if installed in the same
+venv as this server, otherwise gracefully degrades to no-push).
+"""
+from __future__ import annotations
+import ast
+import json
+import os
+import queue
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import urllib.error
+import uuid
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Optional
+
+# Path is /opt/cto/services/pwa/backend/server.py — add /opt/cto/services so
+# we can import the `chat` package alongside the sidecars (matching their style).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from chat.db import append, tail, log_a2a_request, log_a2a_response  # noqa: E402
+
+# ─── Config ─────────────────────────────────────────────────────────────────
+
+PORT = int(os.environ.get("PWA_PORT", "8088"))
+BIND = os.environ.get("PWA_BIND", "127.0.0.1")  # Caddy reverse-proxies to this
+PWA_AUTH_TOKEN = os.environ.get("PWA_AUTH_TOKEN", "")
+FRONTEND_DIR = Path(os.environ.get("PWA_FRONTEND", str(Path(__file__).resolve().parent.parent / "frontend")))
+
+HERMES_A2A_URL = os.environ.get("HERMES_A2A_URL", "http://127.0.0.1:8643/a2a/")
+HERMES_A2A_TOKEN = os.environ.get("HERMES_A2A_TOKEN", "")
+HERMES_SEND_TIMEOUT_S = int(os.environ.get("HERMES_SEND_TIMEOUT_S", "660"))
+
+OPENCLAW_MODEL = os.environ.get("OPENCLAW_MODEL", "openai-codex/gpt-5.5")
+# Stable session id keeps OpenClaw's prompt cache warm across PWA turns and preserves
+# conversation continuity. Single-user assumption; if multi-user comes, derive per user.
+OPENCLAW_SESSION_ID = os.environ.get("OPENCLAW_SESSION_ID", "pwa-john-main")
+
+HUMAN_CHAT_STYLE = (
+    "Audience: John Husband in the PWA chat. Reply in plain conversational English. "
+    "Do not return JSON, YAML, markdown tables, schema blocks, or agent findings. "
+    "Avoid bullet lists unless John explicitly asks for a list. If you used tools or "
+    "delegated work, summarize the result naturally."
+)
+
+VAPID_PUBLIC_KEY_FILE = Path(os.environ.get("VAPID_PUBLIC_KEY_FILE", "/opt/cto/.vapid/public.pem"))
+VAPID_PRIVATE_KEY_FILE = Path(os.environ.get("VAPID_PRIVATE_KEY_FILE", "/opt/cto/.vapid/private.pem"))
+VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:john@husband.llc")
+
+# ─── SSE broadcaster ────────────────────────────────────────────────────────
+
+class SSEBroadcaster:
+    """Fan-out new chat messages to all connected SSE clients."""
+    def __init__(self):
+        self._subs: list[queue.Queue] = []
+        self._lock = threading.Lock()
+        self._poller = threading.Thread(target=self._poll, daemon=True)
+        self._last_id = 0
+        self._poller.start()
+
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue(maxsize=100)
+        with self._lock:
+            self._subs.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self._lock:
+            try:
+                self._subs.remove(q)
+            except ValueError:
+                pass
+
+    def _broadcast(self, msg: dict) -> None:
+        with self._lock:
+            dead = []
+            for q in self._subs:
+                try:
+                    q.put_nowait(msg)
+                except queue.Full:
+                    dead.append(q)
+            for q in dead:
+                try:
+                    self._subs.remove(q)
+                except ValueError:
+                    pass
+
+    def _poll(self) -> None:
+        # Re-init last_id from DB so we don't replay old messages
+        try:
+            existing = tail(0, 1)
+            if existing:
+                self._last_id = existing[-1]["id"]
+        except Exception:
+            pass
+        while True:
+            try:
+                rows = tail(self._last_id, 200)
+                for row in rows:
+                    self._broadcast(row)
+                    self._last_id = max(self._last_id, row["id"])
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+BROADCASTER = SSEBroadcaster()
+
+# ─── Routing logic ──────────────────────────────────────────────────────────
+
+MENTION_RE = re.compile(r"^\s*@(openclaw|hermes)\b\s*", re.IGNORECASE)
+
+_HUMAN_FIELD_PRIORITY = (
+    "reply", "answer", "message", "response", "simplified_response", "final",
+    "summary", "findings", "content", "text",
+)
+
+
+def _strip_json_fence(text: str) -> str:
+    """Return fenced JSON content without markdown fences when present."""
+    stripped = text.strip()
+    fence = re.fullmatch(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, re.DOTALL)
+    if fence:
+        return fence.group(1).strip()
+    return stripped
+
+
+def _select_human_value(value: Any) -> Any:
+    """Recursively choose the most human-facing value from model JSON output."""
+    if isinstance(value, dict):
+        for key in _HUMAN_FIELD_PRIORITY:
+            if key in value and value[key] not in (None, "", [], {}):
+                return _select_human_value(value[key])
+        # Common OpenAI-ish shape, if a raw provider response leaks through.
+        choices = value.get("choices")
+        if isinstance(choices, list) and choices:
+            return _select_human_value(choices[0])
+        if len(value) == 1:
+            return _select_human_value(next(iter(value.values())))
+        return value
+    if isinstance(value, list):
+        if len(value) == 1:
+            return _select_human_value(value[0])
+        return [_select_human_value(item) for item in value]
+    return value
+
+
+def _render_human_value(value: Any) -> str:
+    """Render an unwrapped JSON value as concise chat text."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)) or value is None:
+        return "" if value is None else str(value)
+    if isinstance(value, list):
+        parts = [_render_human_value(item) for item in value]
+        parts = [part for part in parts if part]
+        if not parts:
+            return ""
+        if all("\n" not in part and len(part) < 160 for part in parts):
+            return " ".join(parts)
+        return "\n".join(parts)
+    if isinstance(value, dict):
+        rendered_parts: list[str] = []
+        for key in _HUMAN_FIELD_PRIORITY:
+            if key in value:
+                part = _render_human_value(_select_human_value(value[key]))
+                if part:
+                    rendered_parts.append(part)
+        if rendered_parts:
+            return " ".join(dict.fromkeys(rendered_parts))
+        simple_items = []
+        for key, item in value.items():
+            if isinstance(item, (str, int, float, bool)) and str(item).strip():
+                simple_items.append(f"{key}: {item}")
+        if simple_items and len(simple_items) <= 3:
+            return "; ".join(simple_items)
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+def _humanize_chat_content(text: str) -> str:
+    """Safety net for kind='chat': unwrap obvious JSON/dict replies for John."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    candidate = _strip_json_fence(stripped)
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        try:
+            parsed = ast.literal_eval(candidate)
+        except (ValueError, SyntaxError):
+            return stripped
+        if not isinstance(parsed, (dict, list, str, int, float, bool, type(None))):
+            return stripped
+    selected = _select_human_value(parsed)
+    rendered = _render_human_value(selected).strip()
+    return rendered or stripped
+
+def parse_mention(text: str) -> tuple[str, str]:
+    """Return (target, stripped_text). Target is 'openclaw' or 'hermes'."""
+    m = MENTION_RE.match(text)
+    if m:
+        target = m.group(1).lower()
+        stripped = text[m.end():].strip()
+        return target, stripped
+    return "openclaw", text  # default: OpenClaw is the left-hemisphere router/orchestrator
+
+def send_to_hermes(text: str, task_id: Optional[str] = None) -> dict:
+    """Direct-from-John message to Hermes via the A2A sidecar."""
+    task_id = task_id or str(uuid.uuid4())
+    body = json.dumps({
+        "task_id": task_id,
+        "sender": "john",
+        "capability": "direct-instruction-from-user",
+        "inputs": {"message": text, "audience": "human", "response_style": HUMAN_CHAT_STYLE},
+        "success_criteria": "respond to John in plain conversational English, not JSON or structured findings",
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        HERMES_A2A_URL, data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {HERMES_A2A_TOKEN}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HERMES_SEND_TIMEOUT_S) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        return {"ok": True, "task_id": task_id, "findings": payload.get("findings", "")}
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            payload = {}
+        status = payload.get("status") if isinstance(payload, dict) else None
+        if e.code == 504 or status == "timeout":
+            return {"ok": False, "error": f"Hermes is still working or timed out after {HERMES_SEND_TIMEOUT_S}s; please retry or ask for a smaller step.", "task_id": task_id}
+        detail = payload.get("error") if isinstance(payload, dict) else None
+        return {"ok": False, "error": detail or f"Hermes HTTP {e.code}", "task_id": task_id}
+    except Exception as e:
+        return {"ok": False, "error": repr(e), "task_id": task_id}
+
+def _extract_json_object(raw: str) -> Optional[dict]:
+    """OpenClaw may print logs around --json output; parse the first JSON object."""
+    decoder = json.JSONDecoder()
+    starts = [i for i, ch in enumerate(raw) if ch == "{"]
+    for idx in starts:
+        try:
+            candidate, _end = decoder.raw_decode(raw[idx:])
+            if isinstance(candidate, dict):
+                return candidate
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _extract_openclaw_reply(payload: dict) -> str:
+    """Return the assistant-visible text from OpenClaw's `agent --json` payload.
+
+    The 2026.5.7 structure is:
+        {"status": "ok", "summary": "completed",
+         "result": {"payloads": [{"text": "..."}], "meta": {...}}}
+
+    Older versions had `payloads` and `meta` at the top level. Handle both.
+    Falls back to a JSON dump only as a last resort.
+    """
+    # Look at result.* first (current shape), fall through to top-level (legacy).
+    for root in (payload.get("result") if isinstance(payload.get("result"), dict) else None, payload):
+        if not isinstance(root, dict):
+            continue
+        meta = root.get("meta") if isinstance(root.get("meta"), dict) else {}
+        for key in ("finalAssistantVisibleText", "finalAssistantRawText"):
+            value = meta.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        payloads = root.get("payloads")
+        if isinstance(payloads, list):
+            parts = []
+            for item in payloads:
+                if isinstance(item, dict) and isinstance(item.get("text"), str) and item["text"].strip():
+                    parts.append(item["text"].strip())
+            if parts:
+                return "\n".join(parts)
+    return json.dumps(payload)
+
+
+def send_to_openclaw(text: str) -> dict:
+    """Full agent turn through OpenClaw via the running gateway.
+
+    Routes to `openclaw agent` (gateway transport) with a stable session id so
+    SOUL.md / AGENTS.md / IDENTITY.md / skills / memory are loaded and the prompt
+    cache stays warm across PWA turns. The earlier HTTP and model.run paths were
+    removed — they were bare LLM completions, not agent runs (see CTO-DECISION-013
+    follow-up: PWA OpenClaw routing fix).
+    """
+    human_message = f"{HUMAN_CHAT_STYLE}\n\nJohn says: {text}"
+    # Don't pass --model: the gateway rejects per-caller model overrides with
+    # "GatewayClientRequestError: provider/model overrides are not authorized
+    # for this caller." The agent uses agents.defaults.model.primary from
+    # openclaw.json (openai-codex/gpt-5.5) which is what we want anyway.
+    cmd = [
+        "openclaw", "agent",
+        "--agent", "main",
+        "--session-id", OPENCLAW_SESSION_ID,
+        "--message", human_message,
+        "--thinking", "off",
+        "--json",
+        "--timeout", "180",
+    ]
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=210,
+            cwd="/opt/cto",
+            env={**os.environ, "HOME": os.environ.get("HOME", "/home/cto")},
+        )
+        combined = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
+        if r.returncode != 0:
+            return {"ok": False, "error": combined.strip() or f"openclaw exited {r.returncode}"}
+        payload = _extract_json_object(combined)
+        if not payload:
+            return {"ok": False, "error": f"openclaw returned no parseable JSON: {combined[-1000:]}"}
+        return {"ok": True, "reply": _extract_openclaw_reply(payload), "session_id": OPENCLAW_SESSION_ID}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+# ─── HTTP handler ───────────────────────────────────────────────────────────
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "CtoPWA/1.0"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+
+    # Helpers
+    def _json(self, status: int, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _file(self, path: Path, content_type: str):
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            self._json(404, {"error": "not_found"}); return
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _auth_ok(self) -> bool:
+        if not PWA_AUTH_TOKEN:
+            return True  # auth disabled (dev mode)
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            return auth[len("Bearer "):] == PWA_AUTH_TOKEN
+        # Allow ?token= for initial bootstrap
+        if self.path:
+            qs = self.path.split("?", 1)[-1] if "?" in self.path else ""
+            for kv in qs.split("&"):
+                if kv.startswith("token="):
+                    return kv[len("token="):] == PWA_AUTH_TOKEN
+        return False
+
+    # Routes
+    # Paths served WITHOUT auth — the PWA shell must bootstrap before the JS
+    # can attach the Bearer token. Static assets contain no secrets.
+    _PUBLIC_GET_EXACT = ("/", "/index.html", "/manifest.json", "/service-worker.js", "/api/health")
+    _PUBLIC_GET_PREFIX = ("/static/",)
+
+    def _is_public_get(self, path: str) -> bool:
+        if path in self._PUBLIC_GET_EXACT: return True
+        return any(path.startswith(p) for p in self._PUBLIC_GET_PREFIX)
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/health":
+            return self._json(200, {"status": "ok", "service": "pwa-backend"})
+        # Public paths skip auth; API paths still require it
+        if not self._is_public_get(path) and not self._auth_ok():
+            return self._json(401, {"error": "unauthorized"})
+        if path == "/api/messages":
+            qs = self.path.split("?", 1)[-1] if "?" in self.path else ""
+            since_id = 0
+            for kv in qs.split("&"):
+                if kv.startswith("since_id="):
+                    try: since_id = int(kv[len("since_id="):])
+                    except ValueError: pass
+            return self._json(200, {"messages": tail(since_id, 500)})
+        if path == "/api/stream":
+            return self._sse_stream()
+        if path == "/api/push/vapid_public_key":
+            if VAPID_PUBLIC_KEY_FILE.exists():
+                return self._json(200, {"public_key": VAPID_PUBLIC_KEY_FILE.read_text().strip()})
+            return self._json(200, {"public_key": None, "note": "VAPID keys not yet generated"})
+        if path == "/" or path == "/index.html":
+            return self._file(FRONTEND_DIR / "index.html", "text/html; charset=utf-8")
+        if path == "/manifest.json":
+            return self._file(FRONTEND_DIR / "manifest.json", "application/manifest+json")
+        if path == "/service-worker.js":
+            return self._file(FRONTEND_DIR / "service-worker.js", "application/javascript")
+        if path.startswith("/static/"):
+            sub = path[len("/static/"):].lstrip("/")
+            target = (FRONTEND_DIR / sub).resolve()
+            try: target.relative_to(FRONTEND_DIR.resolve())
+            except ValueError: return self._json(403, {"error": "forbidden"})
+            ct = "text/javascript" if sub.endswith(".js") else \
+                 "text/css" if sub.endswith(".css") else \
+                 "image/png" if sub.endswith(".png") else "application/octet-stream"
+            return self._file(target, ct)
+        return self._json(404, {"error": "not_found"})
+
+    def do_POST(self):
+        if not self._auth_ok():
+            return self._json(401, {"error": "unauthorized"})
+        path = self.path.split("?", 1)[0]
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+        try:
+            body = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return self._json(400, {"error": "invalid_json"})
+
+        if path == "/api/messages":
+            return self._handle_message_post(body)
+        if path == "/api/push/subscribe":
+            sub = body.get("subscription")
+            if not sub:
+                return self._json(400, {"error": "subscription_missing"})
+            append(sender="system", kind="system_event",
+                   content=json.dumps({"event": "push_subscribed", "endpoint_host":
+                                       (sub.get("endpoint","") or "")[:60]}))
+            # Persist subscription
+            sub_dir = Path("/opt/cto/.cache/push-subscriptions"); sub_dir.mkdir(parents=True, exist_ok=True)
+            fname = sub_dir / (uuid.uuid4().hex + ".json")
+            fname.write_text(json.dumps(sub))
+            return self._json(200, {"ok": True})
+        return self._json(404, {"error": "not_found"})
+
+    def _handle_message_post(self, body: dict):
+        text = (body.get("text") or "").strip()
+        if not text:
+            return self._json(400, {"error": "empty_message"})
+
+        # Persist John's message for chat history
+        target, stripped = parse_mention(text)
+        append(sender="john", recipient=target, kind="chat", content=text)
+
+        # Spawn worker so we can return 202 immediately and let SSE deliver the reply
+        def worker():
+            if target == "hermes":
+                r = send_to_hermes(stripped or text)
+                if r.get("ok"):
+                    append(sender="hermes", recipient="john", kind="chat",
+                           content=_humanize_chat_content(r.get("findings", "")))
+                else:
+                    append(sender="system", recipient="john", kind="system_event",
+                           content=json.dumps({"event": "hermes_send_timeout" if "timed out" in (r.get("error") or "") else "hermes_send_failed", "error": r.get("error")}))
+            else:  # openclaw or default
+                r = send_to_openclaw(stripped or text)
+                if r.get("ok"):
+                    append(sender="openclaw", recipient="john", kind="chat",
+                           content=_humanize_chat_content(r.get("reply", "")))
+                else:
+                    append(sender="system", recipient="john", kind="system_event",
+                           content=json.dumps({"event": "openclaw_send_failed", "error": r.get("error")}))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return self._json(202, {"accepted": True, "target": target})
+
+    def _sse_stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        q = BROADCASTER.subscribe()
+        try:
+            # Send a comment to start the stream
+            self.wfile.write(b": connected\n\n"); self.wfile.flush()
+            while True:
+                try:
+                    msg = q.get(timeout=15)
+                    data = json.dumps(msg)
+                    self.wfile.write(f"data: {data}\n\n".encode()); self.wfile.flush()
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n"); self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            BROADCASTER.unsubscribe(q)
+
+# ─── Main ───────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    if not PWA_AUTH_TOKEN:
+        sys.stderr.write("WARN: PWA_AUTH_TOKEN not set — running without auth (dev only)\n")
+    append(sender="system", kind="system_event",
+           content=f"pwa-backend starting on {BIND}:{PORT}")
+    server = ThreadingHTTPServer((BIND, PORT), Handler)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

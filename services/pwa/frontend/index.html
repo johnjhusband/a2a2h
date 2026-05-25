@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>CTO</title>
+  <meta name="theme-color" content="#0a0a0a" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="/static/icon-192.png" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>CTO</h1>
+    <div class="status" id="status">connecting…</div>
+    <div class="toggles" title="A2A: show/hide agent-to-agent traffic. JSON: show the raw JSON envelopes (only meaningful when A2A is on).">
+      <label><input type="checkbox" id="toggle-a2a" /> A2A</label>
+      <label><input type="checkbox" id="toggle-json" /> JSON</label>
+    </div>
+    <button id="enable-push" hidden>Enable push</button>
+  </header>
+  <main id="messages" aria-live="polite"></main>
+  <form id="composer" autocomplete="off">
+    <input id="input" name="text" placeholder="Talk to CTO. Use @Hermes to address Hermes directly." autofocus />
+    <button type="submit">Send</button>
+  </form>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

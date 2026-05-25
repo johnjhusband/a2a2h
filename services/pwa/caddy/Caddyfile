@@ -1,0 +1,38 @@
+# Caddy config for the CTO PWA at cto.husband.llc.
+# Auto-provisions a Let's Encrypt certificate.
+# Proxies all traffic to the PWA backend listening on 127.0.0.1:8088.
+# SSE/EventSource needs the long-running response support Caddy gives by default.
+#
+# Install location: /etc/caddy/Caddyfile (system Caddy service)
+# Or load via `caddy run --config /opt/cto/services/pwa/caddy/Caddyfile`.
+
+{
+    email john@husband.llc
+}
+
+cto.husband.llc {
+    encode gzip zstd
+
+    # Generous timeouts for SSE; backend keepalives are 15s
+    reverse_proxy 127.0.0.1:8088 {
+        flush_interval -1
+        transport http {
+            keepalive 90s
+            response_header_timeout 10m
+        }
+    }
+
+    # Security headers (no need to advertise to bots more than necessary)
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Structured access logging (rotates daily via Caddy default)
+    log {
+        output file /var/log/caddy/cto-access.log
+        format json
+    }
+}
