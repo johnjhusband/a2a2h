@@ -132,7 +132,7 @@ def _extract_text(hermes_resp: dict) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CtoHermesA2ASidecar/1.0"
+    server_version = "A2A2HHermesA2ASidecar/1.0"
 
     def log_message(self, fmt, *args):
         # Default goes to stderr; keep it for journalctl.

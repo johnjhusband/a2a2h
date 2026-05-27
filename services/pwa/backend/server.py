@@ -803,7 +803,7 @@ def send_coordinated_both(text: str) -> dict:
 # ─── HTTP handler ───────────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CtoPWA/1.0"
+    server_version = "A2A2HPWA/1.0"
 
     def log_message(self, fmt, *args):
         # BaseHTTPRequestHandler logs the full request target by default; redact
