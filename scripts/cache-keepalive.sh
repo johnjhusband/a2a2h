@@ -38,12 +38,16 @@ except Exception:
 try:
     count = int(state.get("consecutive_failures") or 0)
     last = float(state.get("last_failure_epoch") or 0)
-    cooldown = int(os.environ.get("HERMES_WORK_PUMP_PROVIDER_FAILURE_COOLDOWN_SECONDS", "2700"))
+    base_cooldown = int(os.environ.get("HERMES_WORK_PUMP_PROVIDER_FAILURE_COOLDOWN_SECONDS", "2700"))
+    max_cooldown = int(os.environ.get("HERMES_WORK_PUMP_PROVIDER_FAILURE_MAX_COOLDOWN_SECONDS", "21600"))
 except Exception:
     raise SystemExit(1)
 
-if count >= 3 and last and cooldown > 0 and time.time() - last < cooldown:
-    raise SystemExit(0)
+if count >= 3 and last and base_cooldown > 0:
+    multiplier = 2 ** max(0, count - 3)
+    cooldown = min(max_cooldown if max_cooldown > 0 else base_cooldown * multiplier, base_cooldown * multiplier)
+    if time.time() - last < cooldown:
+        raise SystemExit(0)
 raise SystemExit(1)
 PY
   echo "hermes ping skipped: provider circuit open"
