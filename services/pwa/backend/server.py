@@ -69,6 +69,7 @@ from chat.db import append, tail, log_a2a_request, log_a2a_response, clone_chat_
 PORT = int(os.environ.get("PWA_PORT", "8088"))
 BIND = os.environ.get("PWA_BIND", "127.0.0.1")  # Caddy reverse-proxies to this
 PWA_AUTH_TOKEN = os.environ.get("PWA_AUTH_TOKEN", "")
+PWA_AUTH_TOKEN_PREVIOUS = os.environ.get("PWA_AUTH_TOKEN_PREVIOUS", "")
 PWA_ALLOW_DEV_NO_AUTH = os.environ.get("PWA_ALLOW_DEV_NO_AUTH", "").lower() in {"1", "true", "yes"}
 FRONTEND_DIR = Path(os.environ.get("PWA_FRONTEND", str(Path(__file__).resolve().parent.parent / "frontend")))
 
@@ -130,6 +131,28 @@ def _pwa_auth_dev_mode_allowed() -> bool:
     """
     instance = (A2A2H_INSTANCE_ID or "production").strip().lower()
     return PWA_ALLOW_DEV_NO_AUTH or instance not in {"production", "prod"}
+
+
+def _pwa_auth_tokens() -> list[str]:
+    """Return configured PWA access tokens in signing/verification order.
+
+    `PWA_AUTH_TOKEN` is the current token and signs newly issued sessions.
+    `PWA_AUTH_TOKEN_PREVIOUS` is an optional comma-separated grace list so a
+    production rotation can keep existing browser sessions and the previous
+    login token working while John confirms the new token out of band. This
+    reduces lockout risk without writing token values to logs or chat.
+    """
+    tokens: list[str] = []
+    for value in (PWA_AUTH_TOKEN, PWA_AUTH_TOKEN_PREVIOUS):
+        for token in value.split(","):
+            token = token.strip()
+            if token and token not in tokens:
+                tokens.append(token)
+    return tokens
+
+
+def _pwa_auth_token_matches(supplied: str) -> bool:
+    return bool(supplied) and any(hmac.compare_digest(supplied, token) for token in _pwa_auth_tokens())
 
 
 def _pwa_auth_startup_error() -> str | None:
@@ -778,19 +801,22 @@ class Handler(BaseHTTPRequestHandler):
         return values[0] if values else ""
 
     @classmethod
-    def _session_signature(cls, issued_at: int) -> str:
+    def _session_signature(cls, issued_at: int, token: str | None = None) -> str:
         msg = f"a2a2h-pwa-session:{issued_at}".encode("utf-8")
-        digest = hmac.new(PWA_AUTH_TOKEN.encode("utf-8"), msg, hashlib.sha256).digest()
+        signing_token = token if token is not None else PWA_AUTH_TOKEN
+        digest = hmac.new(signing_token.encode("utf-8"), msg, hashlib.sha256).digest()
         return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
     @classmethod
     def _make_session_value(cls, now: int | None = None) -> str:
         issued_at = int(now or time.time())
+        if not PWA_AUTH_TOKEN:
+            raise RuntimeError("PWA_AUTH_TOKEN is required to create a PWA session")
         return f"v1:{issued_at}:{cls._session_signature(issued_at)}"
 
     @classmethod
     def _valid_session_value(cls, value: str, now: int | None = None) -> bool:
-        if not PWA_AUTH_TOKEN or not value:
+        if not _pwa_auth_tokens() or not value:
             return False
         parts = value.split(":", 2)
         if len(parts) != 3 or parts[0] != "v1":
@@ -802,7 +828,10 @@ class Handler(BaseHTTPRequestHandler):
         current = int(now or time.time())
         if issued_at > current + 60 or current - issued_at > cls.SESSION_TTL_SECONDS:
             return False
-        return hmac.compare_digest(parts[2], cls._session_signature(issued_at))
+        return any(
+            hmac.compare_digest(parts[2], cls._session_signature(issued_at, token))
+            for token in _pwa_auth_tokens()
+        )
 
     def _session_cookie_header(self) -> str:
         return (
@@ -848,7 +877,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _auth_ok(self) -> bool:
-        if not PWA_AUTH_TOKEN:
+        if not _pwa_auth_tokens():
             return _pwa_auth_dev_mode_allowed()
         return self._valid_session_value(self._cookie_value(self.SESSION_COOKIE_NAME))
 
@@ -859,7 +888,7 @@ class Handler(BaseHTTPRequestHandler):
         supplied = self._query_param("token")
         if not supplied:
             return False
-        if not hmac.compare_digest(supplied, PWA_AUTH_TOKEN):
+        if not _pwa_auth_token_matches(supplied):
             return False
 
         parsed = urllib.parse.urlsplit(self.path)
@@ -1010,7 +1039,7 @@ class Handler(BaseHTTPRequestHandler):
                 supplied = str(body.get("token") or "")
             else:
                 supplied = (urllib.parse.parse_qs(raw).get("token") or [""])[0]
-            if PWA_AUTH_TOKEN and hmac.compare_digest(supplied, PWA_AUTH_TOKEN):
+            if _pwa_auth_token_matches(supplied):
                 return self._start_browser_session()
             return self._login_page("Invalid access token.")
 
