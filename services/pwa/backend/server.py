@@ -803,12 +803,18 @@ class Handler(BaseHTTPRequestHandler):
             data = path.read_bytes()
         except FileNotFoundError:
             self._json(404, {"error": "not_found"}); return
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # Browsers/service workers can cancel static asset requests while a
+            # refresh or install is racing. Treat that like SSE disconnects:
+            # the client went away, not an application failure.
+            return
 
     SESSION_COOKIE_NAME = "a2a2h_pwa_session"
     SESSION_TTL_SECONDS = int(os.environ.get("PWA_SESSION_TTL_SECONDS", str(12 * 60 * 60)))
