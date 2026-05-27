@@ -625,7 +625,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "CtoPWA/1.0"
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+        # BaseHTTPRequestHandler logs the full request target by default; redact
+        # URL-carried credentials from legacy clients before systemd captures it.
+        message = fmt % args
+        message = re.sub(r"([?&](?:token|access_token|auth|key)=)[^\s&\"]+", r"\1[REDACTED]", message)
+        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), message))
 
     # Helpers
     def _json(self, status: int, payload):
@@ -763,9 +767,10 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     # Routes
-    # Paths served WITHOUT auth — the PWA shell must bootstrap before the JS
-    # can attach the Bearer token. Static assets contain no secrets.
-    _PUBLIC_GET_EXACT = ("/", "/index.html", "/manifest.json", "/service-worker.js", "/reset", "/api/health")
+    # Paths served WITHOUT auth. Static assets contain no secrets; the PWA shell
+    # itself must require a session cookie, with only _maybe_bootstrap_session()
+    # allowed to exchange a root/index ?token=... into a cookie.
+    _PUBLIC_GET_EXACT = ("/manifest.json", "/service-worker.js", "/reset", "/api/health")
     _PUBLIC_GET_PREFIX = ("/static/",)
 
     def _is_public_get(self, path: str) -> bool:
