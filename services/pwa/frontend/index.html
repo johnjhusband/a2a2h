@@ -40,7 +40,12 @@
     <div class="feature-card">
       <div class="feature-title"><strong>Voice</strong><span class="feature-status">Browser-native</span></div>
       <span>Read replies aloud or dictate a message.</span>
-      <button id="voice-toggle" aria-pressed="false" title="Speak new A2A2H replies aloud">Voice off</button>
+      <div class="button-row">
+        <button id="voice-toggle" aria-pressed="false" title="Speak new A2A2H replies aloud">Voice off</button>
+        <button id="report-voice-status" title="Write this device's voice readiness to the chat log">Report voice</button>
+      </div>
+      <span class="feature-detail" id="voice-status">Checking voice support…</span>
+      <span class="feature-help" id="voice-help">If dictation is unsupported, Voice can still read replies aloud when speech synthesis is available.</span>
     </div>
   </section>
   <section class="feature-summary" aria-label="PWA feature request status">

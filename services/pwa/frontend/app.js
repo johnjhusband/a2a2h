@@ -14,6 +14,9 @@ const $pushHelp = document.getElementById("push-help");
 const $reportPushStatus = document.getElementById("report-push-status");
 const $voiceToggle = document.getElementById("voice-toggle");
 const $voiceInput = document.getElementById("voice-input");
+const $voiceStatus = document.getElementById("voice-status");
+const $voiceHelp = document.getElementById("voice-help");
+const $reportVoiceStatus = document.getElementById("report-voice-status");
 const $refreshApp = document.getElementById("refresh-app");
 let voiceEnabled = localStorage.getItem("pwa-voice-enabled") === "1";
 let lastSpokenMessageId = 0;
@@ -32,6 +35,45 @@ function setPushStatus(text, isError = false, help = "") {
   $pushStatus.textContent = text;
   $pushStatus.classList.toggle("warn", isError);
   if ($pushHelp) $pushHelp.textContent = help || "If this says unsupported, install/open the PWA from the phone app icon and tap Report status.";
+}
+
+function setVoiceStatus(text, isError = false, help = "") {
+  if (!$voiceStatus) return;
+  $voiceStatus.textContent = text;
+  $voiceStatus.classList.toggle("warn", isError);
+  if ($voiceHelp) $voiceHelp.textContent = help || "If dictation is unsupported, Voice can still read replies aloud when speech synthesis is available.";
+}
+
+function voiceSupportSnapshot(extra = {}) {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  return {
+    speech_synthesis_supported: "speechSynthesis" in window,
+    speech_recognition_supported: !!SpeechRecognition,
+    language: navigator.language || "",
+    platform: navigator.platform || "",
+    standalone: !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches),
+    user_agent: navigator.userAgent || "",
+    voice_enabled: voiceEnabled,
+    status_text: $voiceStatus ? $voiceStatus.textContent : "",
+    ...extra,
+  };
+}
+
+async function reportVoiceDeviceStatus(extra = {}) {
+  if (!$reportVoiceStatus) return;
+  try {
+    $reportVoiceStatus.disabled = true;
+    setVoiceStatus("Reporting this device's voice readiness…");
+    const r = await fetch("/api/voice/device_status", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(voiceSupportSnapshot(extra)),
+    });
+    if (!r.ok) { setVoiceStatus(`Voice report failed: HTTP ${r.status}`, true); return; }
+    setVoiceStatus("Voice readiness was written to the chat log.");
+  } catch (e) {
+    setVoiceStatus("Voice report failed: " + e.message, true);
+  } finally {
+    $reportVoiceStatus.disabled = false;
+  }
 }
 
 function pushHelpText(state) {
@@ -323,6 +365,7 @@ function urlBase64ToUint8(base64) {
 
 $enablePush.addEventListener("click", enablePush);
 if ($reportPushStatus) $reportPushStatus.addEventListener("click", () => reportPushDeviceStatus({ manual: true }));
+if ($reportVoiceStatus) $reportVoiceStatus.addEventListener("click", () => reportVoiceDeviceStatus({ manual: true }));
 
 async function refreshAppShell() {
   try {
@@ -343,26 +386,35 @@ async function refreshAppShell() {
 if ($refreshApp) $refreshApp.addEventListener("click", refreshAppShell);
 
 function setupVoiceControls() {
-  if (!("speechSynthesis" in window)) {
+  const speechOut = "speechSynthesis" in window;
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!speechOut) {
     $voiceToggle.disabled = true;
     $voiceToggle.textContent = "No voice";
   } else {
     setVoiceEnabled(voiceEnabled);
     $voiceToggle.addEventListener("click", () => {
       setVoiceEnabled(!voiceEnabled);
+      setVoiceStatus(voiceEnabled ? "Voice read-aloud is on for new replies." : "Voice read-aloud is off.");
       if (voiceEnabled) {
         const utterance = new SpeechSynthesisUtterance("Voice mode is on. New A2A2H replies will be read aloud.");
         window.speechSynthesis.speak(utterance);
       }
+      reportVoiceDeviceStatus({ manual: false, after_toggle: true });
     });
   }
 
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     $voiceInput.disabled = true;
     $voiceInput.title = "Speech input is not supported in this browser";
+    setVoiceStatus(
+      speechOut ? "Read-aloud supported; dictation is not supported in this browser." : "Voice is not supported in this browser.",
+      !speechOut,
+      speechOut ? "Use Voice for spoken replies; dictate messages with the keyboard microphone if the browser lacks Web Speech dictation." : "Try the installed phone PWA or a browser with Web Speech support."
+    );
     return;
   }
+  setVoiceStatus(speechOut ? "Ready: read-aloud and dictation are supported." : "Dictation supported; read-aloud is not available.", !speechOut);
 
   const recognizer = new SpeechRecognition();
   recognizer.lang = navigator.language || "en-US";
