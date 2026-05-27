@@ -3,7 +3,7 @@
 // Bump SHELL_CACHE when shipping any change to index.html / app.js / style.css.
 // The activate handler deletes any cache != current, so the bump is the only
 // thing the user needs for an update to take effect on next page load.
-const SHELL_CACHE = "a2a2h-shell-v7";
+const SHELL_CACHE = "a2a2h-shell-v8";
 const SHELL_FILES = ["/", "/index.html", "/static/app.js", "/static/style.css", "/manifest.json"];
 
 self.addEventListener("install", (event) => {

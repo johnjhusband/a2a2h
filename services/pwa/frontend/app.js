@@ -9,6 +9,10 @@ const $messages = document.getElementById("messages");
 const $composer = document.getElementById("composer");
 const $input = document.getElementById("input");
 const $enablePush = document.getElementById("enable-push");
+const $voiceToggle = document.getElementById("voice-toggle");
+const $voiceInput = document.getElementById("voice-input");
+let voiceEnabled = localStorage.getItem("pwa-voice-enabled") === "1";
+let lastSpokenMessageId = 0;
 
 function authHeaders(extra = {}) {
   return { "Content-Type": "application/json", ...extra };
@@ -48,7 +52,7 @@ function a2aSummary(m) {
   return { capability: summarizeText(capability, 160), findings: summarizeText(findings, 360), raw };
 }
 
-function appendMessage(m) {
+function appendMessage(m, { speak = false } = {}) {
   // a2a_* rows (JSON envelopes for agent-to-agent traffic) are rendered into the DOM
   // but hidden by CSS unless the user enables the A2A toggle in the topbar.
   // The toggle controls a body class; CSS does the actual hiding (style.css).
@@ -105,6 +109,31 @@ function appendMessage(m) {
   el.appendChild(content);
   $messages.appendChild(el);
   $messages.scrollTop = $messages.scrollHeight;
+  if (speak) speakMessage(m);
+}
+
+function speakableMessage(m) {
+  return m && m.kind === "chat" && ["openclaw", "hermes"].includes(m.sender) && m.content;
+}
+
+function speakMessage(m) {
+  if (!voiceEnabled || !speakableMessage(m) || !("speechSynthesis" in window)) return;
+  if (m.id <= lastSpokenMessageId) return;
+  lastSpokenMessageId = m.id;
+  const utterance = new SpeechSynthesisUtterance(`${senderLabel(m.sender)} says: ${m.content}`);
+  utterance.rate = 1;
+  utterance.pitch = 1;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+function setVoiceEnabled(on) {
+  voiceEnabled = !!on;
+  localStorage.setItem("pwa-voice-enabled", voiceEnabled ? "1" : "0");
+  $voiceToggle.textContent = voiceEnabled ? "Voice on" : "Voice off";
+  $voiceToggle.setAttribute("aria-pressed", voiceEnabled ? "true" : "false");
+  document.body.classList.toggle("voice-enabled", voiceEnabled);
+  if (!voiceEnabled && "speechSynthesis" in window) window.speechSynthesis.cancel();
 }
 
 let lastSeenId = 0;
@@ -123,7 +152,7 @@ async function loadHistory({ replace = false } = {}) {
     }
     (data.messages || []).forEach(m => {
       if (!replace && m.id <= lastSeenId) return;
-      appendMessage(m);
+      appendMessage(m, { speak: false });
       lastSeenId = Math.max(lastSeenId, m.id);
     });
     setStatus("history synced");
@@ -145,7 +174,7 @@ function openStream() {
     try {
       const m = JSON.parse(ev.data);
       if (m.id <= lastSeenId) return;
-      appendMessage(m); lastSeenId = m.id;
+      appendMessage(m, { speak: true }); lastSeenId = m.id;
     } catch (e) {}
   };
 }
@@ -217,6 +246,54 @@ function urlBase64ToUint8(base64) {
 
 $enablePush.addEventListener("click", enablePush);
 
+function setupVoiceControls() {
+  if (!("speechSynthesis" in window)) {
+    $voiceToggle.disabled = true;
+    $voiceToggle.textContent = "No voice";
+  } else {
+    setVoiceEnabled(voiceEnabled);
+    $voiceToggle.addEventListener("click", () => {
+      setVoiceEnabled(!voiceEnabled);
+      if (voiceEnabled) {
+        const utterance = new SpeechSynthesisUtterance("Voice mode is on. New A2A2H replies will be read aloud.");
+        window.speechSynthesis.speak(utterance);
+      }
+    });
+  }
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    $voiceInput.disabled = true;
+    $voiceInput.title = "Speech input is not supported in this browser";
+    return;
+  }
+
+  const recognizer = new SpeechRecognition();
+  recognizer.lang = navigator.language || "en-US";
+  recognizer.interimResults = false;
+  recognizer.maxAlternatives = 1;
+  recognizer.addEventListener("result", (event) => {
+    const transcript = event.results?.[0]?.[0]?.transcript || "";
+    if (transcript) {
+      $input.value = ($input.value ? $input.value + " " : "") + transcript.trim();
+      $input.focus();
+      setStatus("dictation captured — review and send");
+    }
+  });
+  recognizer.addEventListener("error", (event) => setStatus(`dictation failed: ${event.error}`, true));
+  recognizer.addEventListener("end", () => $voiceInput.classList.remove("listening"));
+  $voiceInput.addEventListener("click", () => {
+    try {
+      $voiceInput.classList.add("listening");
+      setStatus("listening…");
+      recognizer.start();
+    } catch (e) {
+      $voiceInput.classList.remove("listening");
+      setStatus("dictation start failed: " + e.message, true);
+    }
+  });
+}
+
 // iOS/Android can kill EventSource while a PWA is backgrounded. On foreground,
 // reload the canonical chat.db history so missed messages appear even if the
 // live stream never delivered them to this page instance.
@@ -243,6 +320,7 @@ function initToggle($el, name) {
 }
 
 initToggle($toggleA2A, "a2a");
+setupVoiceControls();
 
 // Boot
 loadHistory().then(openStream);

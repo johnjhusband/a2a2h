@@ -18,10 +18,12 @@
       <label><input type="checkbox" id="toggle-a2a" /> Show agent coordination</label>
     </div>
     <a class="topbar-link" id="chat-history" href="/chat-log/" target="_blank" rel="noopener">Chat history</a>
+    <button id="voice-toggle" aria-pressed="false" title="Speak new A2A2H replies aloud">Voice off</button>
     <button id="enable-push">Test push</button>
   </header>
   <main id="messages" aria-live="polite"></main>
   <form id="composer" autocomplete="off">
+    <button type="button" id="voice-input" title="Dictate a message">🎙</button>
     <input id="input" name="text" placeholder="Talk to A2A2H. Use @Hermes to address Hermes directly." autofocus />
     <button type="submit">Send</button>
   </form>
