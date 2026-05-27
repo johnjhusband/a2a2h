@@ -3,7 +3,7 @@
 // Bump SHELL_CACHE when shipping any change to index.html / app.js / style.css.
 // The activate handler deletes any cache != current, so the bump is the only
 // thing the user needs for an update to take effect on next page load.
-const SHELL_CACHE = "a2a2h-shell-v23";
+const SHELL_CACHE = "a2a2h-shell-v24";
 const SHELL_FILES = ["/", "/index.html", "/static/app.js", "/static/style.css", "/manifest.json", "/static/icon-192.png", "/static/icon-512.png"];
 const SHELL_PATHS = new Set(SHELL_FILES);
 
@@ -32,10 +32,10 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // The visible PWA shell must update quickly on installed PWAs. Use
-  // network-first for shell files instead of cache-first, then refresh the cache
-  // from the successful response. This prevents old cached HTML/JS from hiding
-  // newly shipped feature-request UI until a manual cache purge.
+  // The visible PWA shell must update quickly on the installed phone PWA.
+  // Use network-first for shell files instead of cache-first, then refresh the
+  // cache from the successful response. This prevents old cached HTML/JS from
+  // hiding newly shipped feature-request UI until a manual cache purge.
   const isShellRequest = event.request.mode === "navigate" || SHELL_PATHS.has(url.pathname);
   if (isShellRequest) {
     event.respondWith(

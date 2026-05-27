@@ -14,61 +14,23 @@
   <header class="topbar">
     <h1>A2A2H</h1>
     <div class="status" id="status">connecting…</div>
-    <div class="header-actions">
-      <label class="header-toggle" title="Show agent coordination traffic inline with chat"><input type="checkbox" id="toggle-a2a" /> Show agent coordination</label>
-      <a class="header-link" id="chat-history" href="/chat-log/" target="_blank" rel="noopener" title="Open durable human-readable chat history">Chat history</a>
-      <button id="enable-push" title="Subscribe this device and send a live self-test push notification">Test push</button>
-      <button id="refresh-app" title="Refresh the installed PWA shell and reload latest features">Update app</button>
-    </div>
-  </header>
-  <section class="feature-panel" aria-label="PWA improvements">
-    <div class="feature-card">
-      <div class="feature-title"><strong>Background alerts</strong><span class="feature-status">Needs phone test</span></div>
-      <span>Use the header Test push button to subscribe this device and send a live notification.</span>
-      <div class="button-row">
-        <button id="report-push-status" title="Write this device's push readiness to the chat log">Report status</button>
+    <details class="settings">
+      <summary aria-label="Settings and features">⋯</summary>
+      <div class="settings-panel">
+        <label class="settings-row" title="Show agent coordination traffic inline with chat"><input type="checkbox" id="toggle-a2a" /> Show agent coordination</label>
+        <a class="settings-row" id="chat-history" href="/chat-log/" target="_blank" rel="noopener">Chat history</a>
+        <button class="settings-row" id="enable-push" title="Subscribe this device and send a live self-test push notification">Test push</button>
+        <button class="settings-row" id="voice-toggle" aria-pressed="false" title="Speak new A2A2H replies aloud">Voice off</button>
+        <button class="settings-row" id="refresh-app" title="Refresh the installed PWA shell">Update app</button>
+        <span class="settings-row settings-status" id="push-status"></span>
+        <span class="settings-row settings-status" id="voice-status"></span>
+        <button class="settings-row settings-secondary" id="report-push-status" hidden>Report push status</button>
+        <button class="settings-row settings-secondary" id="report-voice-status" hidden>Report voice status</button>
+        <span class="settings-row settings-help" id="push-help" hidden></span>
+        <span class="settings-row settings-help" id="voice-help" hidden></span>
       </div>
-      <span class="feature-detail" id="push-status">Checking this device…</span>
-      <span class="feature-help" id="push-help">If this says unsupported, install/open the PWA from the phone app icon and tap Report status.</span>
-    </div>
-    <div class="feature-card">
-      <div class="feature-title"><strong>Agent coordination</strong><span class="feature-status live">Live</span></div>
-      <span>Use the header toggle to show agent handoffs inline.</span>
-      <span class="feature-detail">Renders capability, summarized findings, and collapsible raw JSON.</span>
-    </div>
-    <div class="feature-card">
-      <div class="feature-title"><strong>Chat history</strong><span class="feature-status live">Live</span></div>
-      <span>Use the header Chat history link to open a durable human-readable transcript.</span>
-      <a class="feature-link" href="/chat-log/" target="_blank" rel="noopener">Open transcript</a>
-    </div>
-    <div class="feature-card">
-      <div class="feature-title"><strong>Voice</strong><span class="feature-status">Browser-native</span></div>
-      <span>Read replies aloud or dictate a message.</span>
-      <div class="button-row">
-        <button id="voice-toggle" aria-pressed="false" title="Speak new A2A2H replies aloud">Voice off</button>
-        <button id="report-voice-status" title="Write this device's voice readiness to the chat log">Report voice</button>
-      </div>
-      <span class="feature-detail" id="voice-status">Checking voice support…</span>
-      <span class="feature-help" id="voice-help">If dictation is unsupported, Voice can still read replies aloud when speech synthesis is available.</span>
-    </div>
-  </section>
-  <section class="feature-summary" aria-label="PWA feature request status">
-    <strong>Feature request status:</strong>
-    <span>chat log + coordination transcript are live now;</span>
-    <span>push now shows device readiness and sends a test notification from this button.</span>
-    <span class="app-version">Updated 2026-05-27 12:00 UTC · shell v23</span>
-    <a href="/chat-log/" target="_blank" rel="noopener">Review full logs</a>
-    <details class="release-notes">
-      <summary>What changed today</summary>
-      <ul>
-        <li>Background alerts: visible Enable/Test, readiness text, troubleshooting help, and daily phone status reporting that retries until it actually reaches the server.</li>
-        <li>Agent coordination: Show toggle renders agent handoffs inline with sanitized summaries.</li>
-        <li>Chat history: durable full transcript is available from the Chat history card and Review full logs link.</li>
-        <li>Voice: read-aloud/dictation controls plus phone capability reporting.</li>
-        <li>If this panel is missing on your phone, tap <strong>Update app</strong> once.</li>
-      </ul>
     </details>
-  </section>
+  </header>
   <main id="messages" aria-live="polite"></main>
   <form id="composer" autocomplete="off">
     <button type="button" id="voice-input" title="Dictate a message">🎙</button>
