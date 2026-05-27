@@ -57,6 +57,7 @@ import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
+from datetime import datetime, timezone, timedelta
 
 # Path is /opt/a2a2h/services/pwa/backend/server.py — add /opt/a2a2h/services so
 # we can import the `chat` package alongside the sidecars (matching their style).
@@ -102,6 +103,8 @@ PWA_JOB_RUNNER = Path(os.environ.get("PWA_JOB_RUNNER", str(Path(__file__).resolv
 A2A2H_ROOT = os.environ.get("A2A2H_ROOT", "/opt/a2a2h")
 A2A2H_INSTANCE_ID = os.environ.get("A2A2H_INSTANCE_ID", "production")
 CHAT_DB_PATH = os.environ.get("CHAT_DB", "/opt/a2a2h/chat.db")
+PWA_CHAT_LOG_DIR = Path(os.environ.get("PWA_CHAT_LOG_DIR", "/opt/a2a2h/logs/pwa-chat"))
+CHAT_LOG_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _clone_chat_isolation_error(*, instance_id: str, chat_db: str, a2a2h_root: str) -> str | None:
@@ -388,6 +391,34 @@ def append_agent_reply(*, sender: str, recipient: str = "john", kind: str = "cha
             daemon=True,
         ).start()
     return row_id
+
+
+def _safe_chat_log_path(date_text: str) -> Path | None:
+    if not CHAT_LOG_DATE_RE.match(date_text or ""):
+        return None
+    target = (PWA_CHAT_LOG_DIR / f"{date_text}.md").resolve()
+    try:
+        target.relative_to(PWA_CHAT_LOG_DIR.resolve())
+    except ValueError:
+        return None
+    return target
+
+
+def _chat_log_dates_between(start: str, end: str) -> list[str]:
+    if not CHAT_LOG_DATE_RE.match(start or "") or not CHAT_LOG_DATE_RE.match(end or ""):
+        return []
+    try:
+        current = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        final = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return []
+    if final < current or (final - current).days > 31:
+        return []
+    dates: list[str] = []
+    while current <= final:
+        dates.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    return dates
 
 
 def _start_background_chat_job(*, target: str, message: str) -> tuple[bool, str, Optional[str]]:
@@ -805,6 +836,16 @@ class Handler(BaseHTTPRequestHandler):
                     try: since_id = int(kv[len("since_id="):])
                     except ValueError: pass
             return self._json(200, {"messages": tail(since_id, 500)})
+        if path == "/api/chat/export":
+            return self._chat_export()
+        if path == "/chat-log" or path == "/chat-log/":
+            return self._chat_log_index()
+        if path.startswith("/chat-log/"):
+            date_text = path[len("/chat-log/"):].removesuffix(".md")
+            target = _safe_chat_log_path(date_text)
+            if target is None:
+                return self._json(400, {"error": "invalid_date"})
+            return self._file(target, "text/markdown; charset=utf-8")
         if path == "/api/stream":
             return self._sse_stream()
         if path == "/api/push/vapid_public_key":
@@ -827,6 +868,56 @@ class Handler(BaseHTTPRequestHandler):
                  "image/png" if sub.endswith(".png") else "application/octet-stream"
             return self._file(target, ct)
         return self._json(404, {"error": "not_found"})
+
+    def _chat_log_index(self):
+        PWA_CHAT_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        dates = sorted(p.stem for p in PWA_CHAT_LOG_DIR.glob("*.md") if CHAT_LOG_DATE_RE.match(p.stem))
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today not in dates:
+            dates.append(today)
+        links = "\n".join(
+            f'<li><a href="/chat-log/{html.escape(day)}.md">{html.escape(day)}</a></li>'
+            for day in sorted(set(dates), reverse=True)
+        )
+        body = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>A2A2H chat logs</title><link rel="stylesheet" href="/static/style.css" /></head>
+<body><main class="login-card"><h1>A2A2H chat logs</h1>
+<p>Plain markdown mirrors of the PWA chat. UTC timestamps; structured A2A JSON is omitted.</p>
+<ul>{links}</ul></main></body></html>""".encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _chat_export(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        start = (qs.get("from") or [today])[0]
+        end = (qs.get("to") or [start])[0]
+        dates = _chat_log_dates_between(start, end)
+        if not dates:
+            return self._json(400, {"error": "invalid_date_range", "max_days": 31})
+        parts = [f"# A2A2H PWA chat export — {dates[0]} to {dates[-1]}\n"]
+        for day in dates:
+            path = _safe_chat_log_path(day)
+            if path and path.exists():
+                parts.append(path.read_text(encoding="utf-8"))
+            else:
+                parts.append(f"\n## {day}\n\n_No chat-log file exists for this UTC day._\n")
+        body = "\n\n---\n\n".join(parts).encode("utf-8")
+        filename = f"a2a2h-chat-{dates[0]}-to-{dates[-1]}.md"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]

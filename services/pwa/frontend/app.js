@@ -77,14 +77,27 @@ function appendMessage(m) {
 }
 
 let lastSeenId = 0;
-async function loadHistory() {
+let historyInFlight = false;
+async function loadHistory({ replace = false } = {}) {
+  if (historyInFlight) return;
+  historyInFlight = true;
   try {
     const r = await fetch(`/api/messages?since_id=0`, { headers: authHeaders() });
     if (r.status === 401) { setStatus("unauthorized — open the private login URL again", true); return; }
     if (!r.ok) { setStatus(`history HTTP ${r.status}`, true); return; }
     const data = await r.json();
-    (data.messages || []).forEach(m => { appendMessage(m); lastSeenId = Math.max(lastSeenId, m.id); });
+    if (replace) {
+      $messages.textContent = "";
+      lastSeenId = 0;
+    }
+    (data.messages || []).forEach(m => {
+      if (!replace && m.id <= lastSeenId) return;
+      appendMessage(m);
+      lastSeenId = Math.max(lastSeenId, m.id);
+    });
+    setStatus("history synced");
   } catch (e) { setStatus("history fetch failed: " + e.message, true); }
+  finally { historyInFlight = false; }
 }
 
 function openStream() {
@@ -159,6 +172,14 @@ function urlBase64ToUint8(base64) {
 }
 
 $enablePush.addEventListener("click", enablePush);
+
+// iOS/Android can kill EventSource while a PWA is backgrounded. On foreground,
+// reload the canonical chat.db history so missed messages appear even if the
+// live stream never delivered them to this page instance.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") loadHistory({ replace: true });
+});
+window.addEventListener("focus", () => loadHistory({ replace: true }));
 
 // ─── Toggles ─────────────────────────────────────────────────────────────
 // Two independent body classes drive visibility (style.css does the hiding):
