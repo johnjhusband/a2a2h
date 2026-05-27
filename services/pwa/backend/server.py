@@ -163,7 +163,7 @@ def _pwa_auth_startup_error() -> str | None:
     return "PWA_AUTH_TOKEN is required for production PWA backend startup"
 
 LONG_JOB_RE = re.compile(
-    r"\b(implement|build|create|add|wire|install|upgrade|deploy|research|audit|investigate|diagnos(?:e|is)|debug|fix|repair|patch|refactor|run\s+tests?|test|document|analy[sz]e|background|long[-\s]?running|report\s+back|when\s+(you('|’)re|you\s+are)\s+done)\b",
+    r"\b(implement|build|create|add|wire|install|upgrade|deploy|research|audit|investigate|diagnos(?:e|is)|debug|fix|repair|patch|rework|run\s+tests?|test|document|analy[sz]e|background|long[-\s]?running|report\s+back|when\s+(you('|’)re|you\s+are)\s+done)\b",
     re.IGNORECASE,
 )
 MULTI_STEP_RE = re.compile(r"\b(first|then|after\s+that|finally|multi[-\s]?step|end[-\s]?to[-\s]?end)\b", re.IGNORECASE)
