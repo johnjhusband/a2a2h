@@ -928,6 +928,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/health":
             return self._json(200, {"status": "ok", "service": "pwa-backend"})
+        # Old cached PWA clients may still open /api/stream?token=... from the
+        # retired URL-token auth model. API query tokens must not authenticate;
+        # use 204 for the SSE endpoint so EventSource stops retrying instead of
+        # generating a permanent 401 reconnect storm.
+        if path == "/api/stream" and self._query_param("token"):
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         # Public paths skip auth; API paths still require it
         if not self._is_public_get(path) and not self._auth_ok():
             if path == "/" or path == "/index.html":
