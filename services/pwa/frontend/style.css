@@ -19,7 +19,7 @@ html, body {
   height: 100vh; height: 100dvh;
   overflow: hidden;
 }
-body { display: flex; flex-direction: column; }
+body { display: flex; flex-direction: column; min-height: 0; }
 .topbar {
   display: flex; align-items: center; gap: 1em;
   padding: 0.6em 1em;
@@ -45,6 +45,7 @@ body { display: flex; flex-direction: column; }
 }
 
 .feature-panel {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.6rem;
@@ -82,6 +83,7 @@ body { display: flex; flex-direction: column; }
   border-color: rgba(95, 255, 138, 0.35);
 }
 .feature-summary {
+  flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem 0.65rem;
@@ -135,11 +137,28 @@ body { display: flex; flex-direction: column; }
   .feature-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 440px) {
-  .feature-panel { grid-template-columns: 1fr; }
+  .feature-panel {
+    grid-template-columns: 1fr;
+    max-height: 34dvh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  .feature-summary {
+    max-height: 22dvh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
 }
 
 #messages {
-  flex: 1; overflow-y: auto; padding: 1em;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 1em;
   display: flex; flex-direction: column; gap: 0.5em;
 }
 .msg {
