@@ -284,6 +284,53 @@ def _humanize_chat_content(text: str) -> str:
     rendered = _render_human_value(selected).strip()
     return rendered or stripped
 
+
+SENSITIVE_AUDIT_KEY_RE = re.compile(r"(token|secret|password|passwd|pwd|api[_-]?key|auth|authorization|cookie|credential|private[_-]?key)", re.IGNORECASE)
+
+
+def _sanitize_a2a_audit_value(value: Any) -> Any:
+    """Return a John-visible coordination audit value without obvious secrets.
+
+    The PWA coordination transcript is for observability, not raw debugging.
+    Keep routing metadata and bounded request/response text, but redact common
+    credential shapes and avoid storing oversized protocol/tool envelopes.
+    """
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if SENSITIVE_AUDIT_KEY_RE.search(key_text):
+                clean[key_text] = "[REDACTED]"
+            else:
+                clean[key_text] = _sanitize_a2a_audit_value(item)
+        return clean
+    if isinstance(value, list):
+        return [_sanitize_a2a_audit_value(item) for item in value[:20]]
+    if isinstance(value, str):
+        text = value
+        text = re.sub(r"([?&](?:token|access_token|auth|key)=)[^\s&#]+", r"\1[REDACTED]", text, flags=re.IGNORECASE)
+        text = re.sub(r"(Authorization\s*[:=]\s*Bearer\s+)[^\s,;]+", r"\1[REDACTED]", text, flags=re.IGNORECASE)
+        text = re.sub(r"(a2a2h_pwa_session=)[^\s;]+", r"\1[REDACTED]", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(pw|pwd|password|passcode)\s+(?:is|=|:)\s+\S+", r"\1 is [REDACTED]", text, flags=re.IGNORECASE)
+        if len(text) > 4000:
+            text = text[:3997].rstrip() + "…"
+        return text
+    return value
+
+
+def _log_pwa_a2a_request(*, task_id: str, sender: str, recipient: str, payload: dict) -> None:
+    try:
+        log_a2a_request(task_id=task_id, sender=sender, recipient=recipient, payload=_sanitize_a2a_audit_value(payload))
+    except Exception:
+        return
+
+
+def _log_pwa_a2a_response(*, task_id: str, sender: str, recipient: str, payload: dict) -> None:
+    try:
+        log_a2a_response(task_id=task_id, sender=sender, recipient=recipient, payload=_sanitize_a2a_audit_value(payload))
+    except Exception:
+        return
+
 def parse_mention(text: str) -> tuple[str, str]:
     """Return (target, stripped_text). Target is 'openclaw', 'hermes', or 'both'."""
     m = MENTION_RE.match(text)
@@ -474,13 +521,15 @@ def send_to_hermes(
     """
     task_id = task_id or str(uuid.uuid4())
     payload_inputs = inputs if inputs is not None else {"message": text, "audience": "human", "response_style": HUMAN_CHAT_STYLE}
-    body = json.dumps({
+    request_payload = {
         "task_id": task_id,
         "sender": sender,
         "capability": capability,
         "inputs": payload_inputs,
         "success_criteria": success_criteria,
-    }).encode("utf-8")
+    }
+    _log_pwa_a2a_request(task_id=task_id, sender=sender, recipient="hermes", payload=request_payload)
+    body = json.dumps(request_payload).encode("utf-8")
     req = urllib.request.Request(
         HERMES_A2A_URL, data=body, method="POST",
         headers={"Content-Type": "application/json",
@@ -489,6 +538,7 @@ def send_to_hermes(
     try:
         with urllib.request.urlopen(req, timeout=HERMES_SEND_TIMEOUT_S) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+        _log_pwa_a2a_response(task_id=task_id, sender="hermes", recipient=sender, payload={"status": "ok", "findings": payload.get("findings", "")})
         return {"ok": True, "task_id": task_id, "findings": payload.get("findings", "")}
     except urllib.error.HTTPError as e:
         try:
@@ -497,11 +547,17 @@ def send_to_hermes(
             payload = {}
         status = payload.get("status") if isinstance(payload, dict) else None
         if e.code == 504 or status == "timeout":
-            return {"ok": False, "error": f"Hermes is still working or timed out after {HERMES_SEND_TIMEOUT_S}s; please retry or ask for a smaller step.", "task_id": task_id}
+            error = f"Hermes is still working or timed out after {HERMES_SEND_TIMEOUT_S}s; please retry or ask for a smaller step."
+            _log_pwa_a2a_response(task_id=task_id, sender="hermes", recipient=sender, payload={"status": "timeout", "error": error})
+            return {"ok": False, "error": error, "task_id": task_id}
         detail = payload.get("error") if isinstance(payload, dict) else None
-        return {"ok": False, "error": detail or f"Hermes HTTP {e.code}", "task_id": task_id}
+        error = detail or f"Hermes HTTP {e.code}"
+        _log_pwa_a2a_response(task_id=task_id, sender="hermes", recipient=sender, payload={"status": "error", "error": error})
+        return {"ok": False, "error": error, "task_id": task_id}
     except Exception as e:
-        return {"ok": False, "error": repr(e), "task_id": task_id}
+        error = repr(e)
+        _log_pwa_a2a_response(task_id=task_id, sender="hermes", recipient=sender, payload={"status": "error", "error": error})
+        return {"ok": False, "error": error, "task_id": task_id}
 
 def _extract_json_object(raw: str) -> Optional[dict]:
     """OpenClaw may print logs around --json output; parse the first JSON object."""
