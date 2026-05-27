@@ -11,6 +11,7 @@ const $input = document.getElementById("input");
 const $enablePush = document.getElementById("enable-push");
 const $voiceToggle = document.getElementById("voice-toggle");
 const $voiceInput = document.getElementById("voice-input");
+const $refreshApp = document.getElementById("refresh-app");
 let voiceEnabled = localStorage.getItem("pwa-voice-enabled") === "1";
 let lastSpokenMessageId = 0;
 
@@ -245,6 +246,24 @@ function urlBase64ToUint8(base64) {
 }
 
 $enablePush.addEventListener("click", enablePush);
+
+async function refreshAppShell() {
+  try {
+    setStatus("updating app shell…");
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((reg) => reg.update().catch(() => null)));
+    }
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k.startsWith("a2a2h-shell-")).map((k) => caches.delete(k)));
+    }
+    window.location.reload();
+  } catch (e) {
+    setStatus("app update failed: " + e.message, true);
+  }
+}
+if ($refreshApp) $refreshApp.addEventListener("click", refreshAppShell);
 
 function setupVoiceControls() {
   if (!("speechSynthesis" in window)) {
