@@ -173,29 +173,36 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/service-worker.js").catch(e => console.warn("SW reg failed", e));
 }
 
-// Push subscribe (best-effort — works only on supported Android browsers
-// with VAPID keys configured server-side)
+// Push subscribe + self-test (best-effort — works only on browsers that support
+// Web Push with VAPID keys configured server-side). The button stays visible so
+// John can verify the path on demand instead of guessing whether push works.
 async function enablePush() {
   try {
     if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
       setStatus("push not supported in this browser", true); return;
     }
+    setStatus("checking push…");
     const perm = await Notification.requestPermission();
     if (perm !== "granted") { setStatus("push permission denied", true); return; }
     const reg = await navigator.serviceWorker.ready;
     const vapidResp = await fetch("/api/push/vapid_public_key", { headers: authHeaders() });
     const { public_key } = await vapidResp.json();
     if (!public_key) { setStatus("server has no VAPID keys yet", true); return; }
-    const sub = await reg.pushManager.subscribe({
+    const sub = await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8(public_key),
     });
-    await fetch("/api/push/subscribe", {
+    const subscribeResp = await fetch("/api/push/subscribe", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ subscription: sub.toJSON() }),
     });
-    setStatus("push enabled");
-    $enablePush.hidden = true;
+    if (!subscribeResp.ok) { setStatus(`push subscribe failed: ${subscribeResp.status}`, true); return; }
+    const testResp = await fetch("/api/push/test", { method: "POST", headers: authHeaders(), body: "{}" });
+    if (!testResp.ok) { setStatus(`push test failed: ${testResp.status}`, true); return; }
+    const test = await testResp.json();
+    if (test.attempted > 0 && test.failed === 0) setStatus("push test sent — watch for the notification");
+    else if (test.attempted > 0) setStatus(`push test attempted with ${test.failed} failure(s)`, true);
+    else setStatus("push subscribed, but server did not attempt delivery", true);
   } catch (e) { setStatus("push enable failed: " + e.message, true); }
 }
 
@@ -239,4 +246,3 @@ initToggle($toggleA2A, "a2a");
 
 // Boot
 loadHistory().then(openStream);
-if ("Notification" in window && Notification.permission === "default") $enablePush.hidden = false;

@@ -1073,6 +1073,18 @@ class Handler(BaseHTTPRequestHandler):
             fname = PUSH_SUBSCRIPTION_DIR / (uuid.uuid4().hex + ".json")
             fname.write_text(json.dumps(sub))
             return self._json(200, {"ok": True})
+        if path == "/api/push/test":
+            attempted, failed = _send_push_notification(
+                sender="system",
+                body="A2A2H PWA push self-test. If you can see this, background delivery is wired.",
+                correlation="push-self-test",
+            )
+            append(sender="system", kind="system_event", content=json.dumps({
+                "event": "push_self_test",
+                "attempted": attempted,
+                "failed": failed,
+            }))
+            return self._json(200, {"ok": True, "attempted": attempted, "failed": failed})
         return self._json(404, {"error": "not_found"})
 
     def _handle_message_post(self, body: dict):
