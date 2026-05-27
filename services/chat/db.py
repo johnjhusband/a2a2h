@@ -38,7 +38,16 @@ CREATE INDEX IF NOT EXISTS idx_messages_correlation ON messages(correlation);
 """
 
 def _init(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        # WAL improves concurrent readers, but a short-lived test or helper can
+        # briefly hold a SQLite lock while a fresh process initializes the same
+        # DB. Do not fail initialization solely because the WAL toggle could not
+        # acquire the lock; the schema creation below is still idempotent and the
+        # connection remains usable with SQLite's current journal mode.
+        if "locked" not in str(exc).lower():
+            raise
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
 
