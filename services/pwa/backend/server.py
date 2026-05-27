@@ -20,14 +20,20 @@ Routing of the human user's outbound messages:
   - Starts with "@hermes " (case-insensitive) → POST to Hermes A2A sidecar
   - Starts with "@openclaw " → run the real OpenClaw agent via the gateway-backed
     CLI session (not a raw model/capability fallback)
+  - Starts with "@both " → coordinated two-step flow: OpenClaw strategy first,
+    then Hermes implementation after a scoped handoff. This intentionally avoids
+    uncontrolled parallel replies from both agents.
   - No @-mention → small content-aware router: Hermes-targeted language goes to
-    Hermes, greetings/both-hemisphere prompts go to both, everything else defaults
-    to OpenClaw as orchestrator.
+    Hermes, greetings/both-hemisphere prompts use the same coordinated @both
+    flow, everything else defaults to OpenClaw as orchestrator.
 
 Implementation: pure stdlib http.server + threading. SSE via long-running
-generator response. Push notifications stored as DB rows for now (sending push
-requires a small library — wired via `pywebpush` if installed in the same
-venv as this server, otherwise gracefully degrades to no-push).
+generator response. Long-job intent is handed to a detached repo-backed runner
+because OpenClaw TaskFlow writes are currently an internal plugin/runtime API,
+not a first-class CLI/HTTP primitive available to this Python bridge. Push
+notifications stored as DB rows for now (sending push requires a small library —
+wired via `pywebpush` if installed in the same venv as this server, otherwise
+gracefully degrades to no-push).
 """
 from __future__ import annotations
 import ast
@@ -67,6 +73,11 @@ OPENCLAW_MODEL = os.environ.get("OPENCLAW_MODEL", "openai-codex/gpt-5.5")
 # Stable session id keeps OpenClaw's prompt cache warm across PWA turns and preserves
 # conversation continuity. Single-user assumption; if multi-user comes, derive per user.
 OPENCLAW_SESSION_ID = os.environ.get("OPENCLAW_SESSION_ID", "pwa-john-main")
+# OpenClaw often has to inspect the A2A2H repo or delegate work. The PWA already
+# returns 202 immediately and delivers via SSE, so give the background worker a
+# long-task budget instead of killing real A2A2H work at the old interactive limit.
+OPENCLAW_AGENT_TIMEOUT_S = int(os.environ.get("OPENCLAW_AGENT_TIMEOUT_S", "900"))
+OPENCLAW_SUBPROCESS_TIMEOUT_S = int(os.environ.get("OPENCLAW_SUBPROCESS_TIMEOUT_S", str(OPENCLAW_AGENT_TIMEOUT_S + 30)))
 
 HUMAN_CHAT_STYLE = (
     "Audience: a human user in the PWA chat. Reply in plain conversational English. "
@@ -78,6 +89,15 @@ HUMAN_CHAT_STYLE = (
 VAPID_PUBLIC_KEY_FILE = Path(os.environ.get("VAPID_PUBLIC_KEY_FILE", "/opt/a2a2h/.vapid/public.pem"))
 VAPID_PRIVATE_KEY_FILE = Path(os.environ.get("VAPID_PRIVATE_KEY_FILE", "/opt/a2a2h/.vapid/private.pem"))
 VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:admin@example.com")
+
+PWA_JOB_PAYLOAD_DIR = Path(os.environ.get("PWA_JOB_PAYLOAD_DIR", "/opt/a2a2h/.cache/pwa-jobs/payloads"))
+PWA_JOB_RUNNER = Path(os.environ.get("PWA_JOB_RUNNER", str(Path(__file__).resolve().parent / "job_runner.py")))
+
+LONG_JOB_RE = re.compile(
+    r"\b(implement|build|create|add|wire|install|upgrade|deploy|research|audit|investigate|diagnos(?:e|is)|debug|fix|repair|patch|refactor|run\s+tests?|test|document|analy[sz]e|background|long[-\s]?running|report\s+back|when\s+(you('|’)re|you\s+are)\s+done)\b",
+    re.IGNORECASE,
+)
+MULTI_STEP_RE = re.compile(r"\b(first|then|after\s+that|finally|multi[-\s]?step|end[-\s]?to[-\s]?end)\b", re.IGNORECASE)
 
 # ─── SSE broadcaster ────────────────────────────────────────────────────────
 
@@ -139,7 +159,8 @@ BROADCASTER = SSEBroadcaster()
 
 # ─── Routing logic ──────────────────────────────────────────────────────────
 
-MENTION_RE = re.compile(r"^\s*@(openclaw|hermes)\b\s*", re.IGNORECASE)
+MENTION_RE = re.compile(r"^\s*@(openclaw|hermes|both)\b\s*", re.IGNORECASE)
+MENTION_ANY_RE = re.compile(r"@(openclaw|hermes|both)\b", re.IGNORECASE)
 GREETING_RE = re.compile(r"^\s*(hi|hello|hey|yo|gm|good\s+(morning|afternoon|evening))\b[\s!.?]*$", re.IGNORECASE)
 HERMES_ADDRESS_RE = re.compile(r"\b(hermes|right\s+hemisphere)\b", re.IGNORECASE)
 OPENCLAW_ADDRESS_RE = re.compile(r"\b(openclaw|left\s+hemisphere)\b", re.IGNORECASE)
@@ -242,6 +263,12 @@ def parse_mention(text: str) -> tuple[str, str]:
     if m:
         target = m.group(1).lower()
         stripped = text[m.end():].strip()
+        mentioned = {item.lower() for item in MENTION_ANY_RE.findall(text)}
+        # John may explicitly sequence the two hemispheres in one turn, e.g.
+        # "@openclaw start with strategy; @hermes implement after". Treat that
+        # as coordinated @both, never as two uncontrolled parallel deliveries.
+        if target != "both" and {"openclaw", "hermes"}.issubset(mentioned):
+            return "both", stripped
         return target, stripped
     # Content-aware no-mention routing. Keep this deterministic and conservative:
     # OpenClaw remains the default orchestrator for repairs, decisions, and ambiguous
@@ -257,15 +284,82 @@ def parse_mention(text: str) -> tuple[str, str]:
         return "openclaw", text
     return "openclaw", text  # default: OpenClaw is the left-hemisphere router/orchestrator
 
-def send_to_hermes(text: str, task_id: Optional[str] = None) -> dict:
-    """Direct-from-John message to Hermes via the A2A sidecar."""
+
+def _is_long_job_intent(text: str) -> bool:
+    """Conservative heuristic for turns that should survive the PWA process.
+
+    OpenClaw's internal TaskFlow API is not exposed to this Python bridge as a
+    first-class CLI/HTTP write surface, so PWA long jobs use a detached local
+    runner. Keep greetings and short Q&A on the existing lightweight path; route
+    repo/infrastructure/research work to durable execution.
+    """
+    words = re.findall(r"\S+", text or "")
+    if LONG_JOB_RE.search(text or "") and (len(words) >= 4 or MULTI_STEP_RE.search(text or "")):
+        return True
+    if len(words) >= 35 and (LONG_JOB_RE.search(text or "") or MULTI_STEP_RE.search(text or "")):
+        return True
+    return False
+
+
+def _start_background_chat_job(*, target: str, message: str) -> tuple[bool, str, Optional[str]]:
+    """Persist a PWA long-job payload and start the detached repo-backed runner."""
+    job_id = f"pwa-bg-{uuid.uuid4().hex[:12]}"
+    try:
+        PWA_JOB_PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        payload_path = PWA_JOB_PAYLOAD_DIR / f"{job_id}.json"
+        payload_path.write_text(json.dumps({"job_id": job_id, "target": target, "message": message}))
+        try:
+            payload_path.chmod(0o600)
+        except OSError:
+            pass
+        log_path = PWA_JOB_PAYLOAD_DIR.parent / f"{job_id}.log"
+        log_fh = log_path.open("ab", buffering=0)
+        try:
+            subprocess.Popen(
+                [sys.executable, str(PWA_JOB_RUNNER), "--job-id", job_id, "--payload", str(payload_path)],
+                cwd="/opt/a2a2h",
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+                env={
+                    **os.environ,
+                    "HOME": os.environ.get("HOME", "/home/a2a2h"),
+                    # Keep long jobs off the live PWA chat session so John can
+                    # continue short turns while a background run is active.
+                    "OPENCLAW_SESSION_ID": f"{OPENCLAW_SESSION_ID}-{job_id}",
+                },
+            )
+        finally:
+            log_fh.close()
+        return True, job_id, None
+    except Exception as exc:
+        return False, job_id, repr(exc)
+
+def send_to_hermes(
+    text: str,
+    task_id: Optional[str] = None,
+    *,
+    sender: str = "john",
+    capability: str = "direct-instruction-from-user",
+    inputs: Optional[dict] = None,
+    success_criteria: str = "respond to John in plain conversational English, not JSON or structured findings",
+) -> dict:
+    """Send a message to Hermes via the A2A sidecar.
+
+    Direct John turns use the human Hermes session. Coordinated @both handoffs use
+    sender=openclaw and audience=agent so Hermes works as implementer, not as a
+    second independent human-facing responder.
+    """
     task_id = task_id or str(uuid.uuid4())
+    payload_inputs = inputs if inputs is not None else {"message": text, "audience": "human", "response_style": HUMAN_CHAT_STYLE}
     body = json.dumps({
         "task_id": task_id,
-        "sender": "john",
-        "capability": "direct-instruction-from-user",
-        "inputs": {"message": text, "audience": "human", "response_style": HUMAN_CHAT_STYLE},
-        "success_criteria": "respond to John in plain conversational English, not JSON or structured findings",
+        "sender": sender,
+        "capability": capability,
+        "inputs": payload_inputs,
+        "success_criteria": success_criteria,
     }).encode("utf-8")
     req = urllib.request.Request(
         HERMES_A2A_URL, data=body, method="POST",
@@ -354,14 +448,14 @@ def send_to_openclaw(text: str) -> dict:
         "--message", human_message,
         "--thinking", "off",
         "--json",
-        "--timeout", "180",
+        "--timeout", str(OPENCLAW_AGENT_TIMEOUT_S),
     ]
     try:
         r = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=210,
+            timeout=OPENCLAW_SUBPROCESS_TIMEOUT_S,
             cwd="/opt/a2a2h",
             env={**os.environ, "HOME": os.environ.get("HOME", "/home/a2a2h")},
         )
@@ -372,8 +466,69 @@ def send_to_openclaw(text: str) -> dict:
         if not payload:
             return {"ok": False, "error": f"openclaw returned no parseable JSON: {combined[-1000:]}"}
         return {"ok": True, "reply": _extract_openclaw_reply(payload), "session_id": OPENCLAW_SESSION_ID}
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "timeout": True,
+            "error": (
+                f"OpenClaw is still working or exceeded the PWA background budget "
+                f"after {OPENCLAW_SUBPROCESS_TIMEOUT_S}s. Break the request into a "
+                "smaller step or run it as an explicit long-running task."
+            ),
+        }
     except Exception as e:
         return {"ok": False, "error": repr(e)}
+
+
+def send_coordinated_both(text: str) -> dict:
+    """Run @both as OpenClaw strategy first, Hermes implementation second.
+
+    This is deliberately sequential. Hermes receives OpenClaw's reply as the
+    scoped handoff and returns structured implementation findings; it is not
+    invoked in parallel and is not treated as an independent human-chat reply.
+    """
+    coordination_id = f"coord-{uuid.uuid4().hex[:12]}"
+    append(sender="system", recipient="john", kind="system_event", correlation=coordination_id,
+           content=json.dumps({"event": "coordinated_both_started", "owner": "openclaw", "phase": "strategy"}))
+
+    openclaw_result = send_to_openclaw(
+        "Coordinated @both request. You own strategy and routing authority. "
+        "Reply first with the strategy/architecture and, if Hermes should implement, "
+        "include a clear scoped handoff for Hermes. John says: " + text
+    )
+    if not openclaw_result.get("ok"):
+        return {"ok": False, "coordination_id": coordination_id, "phase": "openclaw_strategy", "error": openclaw_result.get("error")}
+
+    openclaw_reply = _humanize_chat_content(openclaw_result.get("reply", ""))
+    append(sender="openclaw", recipient="john", kind="chat", correlation=coordination_id,
+           content=openclaw_reply)
+
+    append(sender="system", recipient="john", kind="system_event", correlation=coordination_id,
+           content=json.dumps({"event": "coordinated_both_handoff", "owner": "hermes", "phase": "implementation"}))
+    hermes_result = send_to_hermes(
+        text,
+        task_id=f"{coordination_id}-hermes",
+        sender="openclaw",
+        capability="coordinated-pwa-handoff-implementation",
+        inputs={
+            "message": text,
+            "audience": "agent",
+            "openclaw_strategy_and_handoff": openclaw_reply,
+            "routing_contract": (
+                "This is a coordinated @both flow. OpenClaw has spoken first and remains decider. "
+                "Implement only the scoped handoff. Return bounded structured findings as data."
+            ),
+        },
+        success_criteria="Hermes implements or validates the scoped handoff and returns bounded structured findings for OpenClaw/John.",
+    )
+    if hermes_result.get("ok"):
+        append(sender="hermes", recipient="john", kind="chat", correlation=coordination_id,
+               content=_humanize_chat_content(hermes_result.get("findings", "")))
+    else:
+        append(sender="system", recipient="john", kind="system_event", correlation=coordination_id,
+               content=json.dumps({"event": "hermes_coordinated_handoff_failed", "error": hermes_result.get("error")}))
+
+    return {"ok": True, "coordination_id": coordination_id, "openclaw": openclaw_result, "hermes": hermes_result}
 
 # ─── HTTP handler ───────────────────────────────────────────────────────────
 
@@ -502,10 +657,32 @@ class Handler(BaseHTTPRequestHandler):
         target, stripped = parse_mention(text)
         append(sender="john", recipient=target, kind="chat", content=text)
 
+        msg = stripped or text
+        if _is_long_job_intent(msg):
+            ok, job_id, error = _start_background_chat_job(target=target, message=msg)
+            if ok:
+                append(
+                    sender="openclaw",
+                    recipient="john",
+                    kind="chat",
+                    correlation=job_id,
+                    content=(
+                        f"I’m starting that as background job {job_id}. "
+                        "I’ll post the final result here when it finishes."
+                    ),
+                )
+                return self._json(202, {"accepted": True, "target": target, "background": True, "job_id": job_id})
+            append(
+                sender="system",
+                recipient="john",
+                kind="system_event",
+                correlation=job_id,
+                content=json.dumps({"event": "pwa_background_job_start_failed", "job_id": job_id, "error": error}),
+            )
+            # Fall through to the in-process worker if detached start fails.
+
         # Spawn worker so we can return 202 immediately and let SSE deliver the reply
         def worker():
-            msg = stripped or text
-
             def deliver_hermes():
                 r = send_to_hermes(msg)
                 if r.get("ok"):
@@ -522,13 +699,15 @@ class Handler(BaseHTTPRequestHandler):
                            content=_humanize_chat_content(r.get("reply", "")))
                 else:
                     append(sender="system", recipient="john", kind="system_event",
-                           content=json.dumps({"event": "openclaw_send_failed", "error": r.get("error")}))
+                           content=json.dumps({"event": "openclaw_send_timeout" if r.get("timeout") else "openclaw_send_failed", "error": r.get("error")}))
 
             if target == "hermes":
                 deliver_hermes()
             elif target == "both":
-                threading.Thread(target=deliver_openclaw, daemon=True).start()
-                threading.Thread(target=deliver_hermes, daemon=True).start()
+                r = send_coordinated_both(msg)
+                if not r.get("ok"):
+                    append(sender="system", recipient="john", kind="system_event",
+                           content=json.dumps({"event": "coordinated_both_failed", "phase": r.get("phase"), "error": r.get("error")}))
             else:  # openclaw or default
                 deliver_openclaw()
 
