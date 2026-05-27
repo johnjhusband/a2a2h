@@ -11,6 +11,7 @@
 set -e
 PATH=$HOME/.local/bin:$HOME/.hermes/hermes-agent/venv/bin:$PATH
 TS=$(date -Iseconds)
+KEEPALIVE_ROOT="${KEEPALIVE_ROOT:-/opt/a2a2h}"
 
 # OpenClaw pwa-john-main keep-alive (uses openclaw agent --session-id reuse)
 timeout 90 openclaw agent --agent main --session-id pwa-john-main \
@@ -21,6 +22,34 @@ timeout 90 openclaw agent --agent main --session-id pwa-john-main \
 # Keep bearer values out of shell variables, command arguments, and journald.
 # The Python helper reads the local env file in-process and sends the Authorization
 # header through urllib instead of exposing it in a curl -H process argument.
+if KEEPALIVE_ROOT="$KEEPALIVE_ROOT" python3 - <<'PY' >/dev/null 2>&1; then
+import json
+import os
+import time
+
+root = os.environ.get("KEEPALIVE_ROOT") or "/opt/a2a2h"
+state_path = os.path.join(root, ".cache", "hermes-work-pump-provider-failure.json")
+try:
+    with open(state_path, "r", encoding="utf-8") as fh:
+        state = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+try:
+    count = int(state.get("consecutive_failures") or 0)
+    last = float(state.get("last_failure_epoch") or 0)
+    cooldown = int(os.environ.get("HERMES_WORK_PUMP_PROVIDER_FAILURE_COOLDOWN_SECONDS", "2700"))
+except Exception:
+    raise SystemExit(1)
+
+if count >= 3 and last and cooldown > 0 and time.time() - last < cooldown:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+  echo "hermes ping skipped: provider circuit open"
+  exit 0
+fi
+
 KEEPALIVE_TS="$TS" python3 - <<'PY' >/dev/null 2>&1 || echo "hermes ping failed"
 import json
 import os
