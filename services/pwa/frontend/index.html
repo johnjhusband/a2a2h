@@ -14,13 +14,36 @@
   <header class="topbar">
     <h1>A2A2H</h1>
     <div class="status" id="status">connecting…</div>
-    <div class="toggles" title="Show or hide OpenClaw ↔ Hermes coordination traffic inline with the chat.">
-      <label><input type="checkbox" id="toggle-a2a" /> Show agent coordination</label>
-    </div>
-    <a class="topbar-link" id="chat-history" href="/chat-log/" target="_blank" rel="noopener">Chat history</a>
-    <button id="voice-toggle" aria-pressed="false" title="Speak new A2A2H replies aloud">Voice off</button>
-    <button id="enable-push">Test push</button>
+    <button id="refresh-app" title="Refresh the installed PWA shell and reload latest features">Update app</button>
   </header>
+  <section class="feature-panel" aria-label="PWA improvements">
+    <div class="feature-card">
+      <div class="feature-title"><strong>Background alerts</strong><span class="feature-status">Needs phone test</span></div>
+      <span>Enable push and send a live device notification.</span>
+      <button id="enable-push">Enable/Test</button>
+    </div>
+    <div class="feature-card">
+      <div class="feature-title"><strong>Agent coordination</strong><span class="feature-status live">Live</span></div>
+      <span>Show OpenClaw ↔ Hermes handoffs inline.</span>
+      <label class="inline-toggle"><input type="checkbox" id="toggle-a2a" /> Show</label>
+    </div>
+    <div class="feature-card">
+      <div class="feature-title"><strong>Chat history</strong><span class="feature-status live">Live</span></div>
+      <span>Open a durable human-readable transcript.</span>
+      <a class="feature-link" id="chat-history" href="/chat-log/" target="_blank" rel="noopener">Open</a>
+    </div>
+    <div class="feature-card">
+      <div class="feature-title"><strong>Voice</strong><span class="feature-status">Browser-native</span></div>
+      <span>Read replies aloud or dictate a message.</span>
+      <button id="voice-toggle" aria-pressed="false" title="Speak new A2A2H replies aloud">Voice off</button>
+    </div>
+  </section>
+  <section class="feature-summary" aria-label="PWA feature request status">
+    <strong>Feature request status:</strong>
+    <span>chat log + coordination transcript are live now;</span>
+    <span>push/voice are wired and waiting on your phone/browser confirmation.</span>
+    <a href="/chat-log/" target="_blank" rel="noopener">Review full logs</a>
+  </section>
   <main id="messages" aria-live="polite"></main>
   <form id="composer" autocomplete="off">
     <button type="button" id="voice-input" title="Dictate a message">🎙</button>

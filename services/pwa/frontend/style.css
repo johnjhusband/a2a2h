@@ -43,6 +43,78 @@ body { display: flex; flex-direction: column; }
 .topbar button:disabled, #composer button:disabled {
   opacity: 0.45; cursor: not-allowed;
 }
+
+.feature-panel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.6rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid #222;
+  background: #0d0d0d;
+}
+.feature-card {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  border: 1px solid #242424;
+  border-radius: 12px;
+  padding: 0.65rem;
+  background: #141414;
+}
+.feature-title {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.4rem;
+}
+.feature-card strong { color: var(--fg); font-size: 0.92rem; }
+.feature-card span { color: var(--muted); font-size: 0.78rem; line-height: 1.25; }
+.feature-status {
+  flex: 0 0 auto;
+  color: #ffd479 !important;
+  border: 1px solid rgba(255, 212, 121, 0.35);
+  border-radius: 999px;
+  padding: 0.12rem 0.38rem;
+  font-size: 0.66rem !important;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.feature-status.live {
+  color: var(--john) !important;
+  border-color: rgba(95, 255, 138, 0.35);
+}
+.feature-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+  align-items: center;
+  padding: 0.5rem 0.85rem;
+  border-bottom: 1px solid #222;
+  background: #111827;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.feature-summary strong { color: var(--fg); }
+.feature-summary a { color: var(--accent); font-weight: 800; text-decoration: none; }
+.feature-summary a:hover { text-decoration: underline; }
+.feature-card button, .feature-link {
+  justify-self: start;
+  background: var(--accent); color: #000; border: none;
+  padding: 0.38rem 0.65rem; border-radius: 7px; font-weight: 700;
+  font-size: 0.82rem; text-decoration: none; cursor: pointer;
+}
+.feature-card button[aria-pressed="true"] { background: var(--john); }
+.inline-toggle {
+  justify-self: start;
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  color: var(--accent); font-weight: 700; font-size: 0.84rem;
+}
+@media (max-width: 760px) {
+  .topbar { gap: 0.55rem; }
+  .feature-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 440px) {
+  .feature-panel { grid-template-columns: 1fr; }
+}
+
 #messages {
   flex: 1; overflow-y: auto; padding: 1em;
   display: flex; flex-direction: column; gap: 0.5em;
