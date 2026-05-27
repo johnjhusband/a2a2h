@@ -94,6 +94,8 @@ HUMAN_CHAT_STYLE = (
 VAPID_PUBLIC_KEY_FILE = Path(os.environ.get("VAPID_PUBLIC_KEY_FILE", "/opt/a2a2h/.vapid/public.pem"))
 VAPID_PRIVATE_KEY_FILE = Path(os.environ.get("VAPID_PRIVATE_KEY_FILE", "/opt/a2a2h/.vapid/private.pem"))
 VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:admin@example.com")
+PUSH_SUBSCRIPTION_DIR = Path(os.environ.get("PWA_PUSH_SUBSCRIPTION_DIR", "/opt/a2a2h/.cache/push-subscriptions"))
+PWA_PUSH_ENABLED = os.environ.get("PWA_PUSH_ENABLED", "1").lower() not in {"0", "false", "no"}
 
 PWA_JOB_PAYLOAD_DIR = Path(os.environ.get("PWA_JOB_PAYLOAD_DIR", "/opt/a2a2h/.cache/pwa-jobs/payloads"))
 PWA_JOB_RUNNER = Path(os.environ.get("PWA_JOB_RUNNER", str(Path(__file__).resolve().parent / "job_runner.py")))
@@ -321,6 +323,71 @@ def _is_long_job_intent(text: str) -> bool:
     if len(words) >= 35 and (LONG_JOB_RE.search(text or "") or MULTI_STEP_RE.search(text or "")):
         return True
     return False
+
+
+def _push_payload(*, sender: str, body: str, correlation: str | None = None) -> dict:
+    clean = re.sub(r"\s+", " ", body or "").strip()
+    if len(clean) > 180:
+        clean = clean[:177].rstrip() + "…"
+    label = {"openclaw": "OpenClaw", "hermes": "Hermes", "system": "A2A2H"}.get(sender, "A2A2H")
+    return {
+        "title": f"{label} replied",
+        "body": clean or "New A2A2H activity",
+        "tag": correlation or "a2a2h-reply",
+        "url": "/",
+        "requireInteraction": False,
+    }
+
+
+def _send_push_notification(*, sender: str, body: str, correlation: str | None = None) -> tuple[int, int]:
+    """Best-effort Web Push delivery for backgrounded PWA clients.
+
+    Returns (attempted, failed). Missing pywebpush/VAPID/subscriptions degrades
+    safely to (0, 0) because chat.db remains the canonical delivery channel.
+    """
+    if not PWA_PUSH_ENABLED or not VAPID_PRIVATE_KEY_FILE.exists():
+        return (0, 0)
+    try:
+        from pywebpush import webpush  # type: ignore
+    except Exception:
+        return (0, 0)
+
+    payload = json.dumps(_push_payload(sender=sender, body=body, correlation=correlation))
+    files = sorted(PUSH_SUBSCRIPTION_DIR.glob("*.json")) if PUSH_SUBSCRIPTION_DIR.exists() else []
+    attempted = failed = 0
+    stale: list[Path] = []
+    for sub_file in files:
+        try:
+            subscription = json.loads(sub_file.read_text())
+            webpush(
+                subscription_info=subscription,
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY_FILE.read_text().strip(),
+                vapid_claims={"sub": VAPID_EMAIL},
+            )
+            attempted += 1
+        except Exception as exc:
+            failed += 1
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {404, 410}:
+                stale.append(sub_file)
+    for sub_file in stale:
+        try:
+            sub_file.unlink()
+        except FileNotFoundError:
+            pass
+    return attempted, failed
+
+
+def append_agent_reply(*, sender: str, recipient: str = "john", kind: str = "chat", content: str, correlation: str | None = None) -> int:
+    row_id = append(sender=sender, recipient=recipient, kind=kind, content=content, correlation=correlation)
+    if recipient == "john" and kind == "chat" and sender in {"openclaw", "hermes", "system"}:
+        threading.Thread(
+            target=_send_push_notification,
+            kwargs={"sender": sender, "body": content, "correlation": correlation},
+            daemon=True,
+        ).start()
+    return row_id
 
 
 def _start_background_chat_job(*, target: str, message: str) -> tuple[bool, str, Optional[str]]:
@@ -783,8 +850,8 @@ class Handler(BaseHTTPRequestHandler):
                    content=json.dumps({"event": "push_subscribed", "endpoint_host":
                                        (sub.get("endpoint","") or "")[:60]}))
             # Persist subscription
-            sub_dir = Path("/opt/a2a2h/.cache/push-subscriptions"); sub_dir.mkdir(parents=True, exist_ok=True)
-            fname = sub_dir / (uuid.uuid4().hex + ".json")
+            PUSH_SUBSCRIPTION_DIR.mkdir(parents=True, exist_ok=True)
+            fname = PUSH_SUBSCRIPTION_DIR / (uuid.uuid4().hex + ".json")
             fname.write_text(json.dumps(sub))
             return self._json(200, {"ok": True})
         return self._json(404, {"error": "not_found"})
@@ -802,7 +869,7 @@ class Handler(BaseHTTPRequestHandler):
         if _is_long_job_intent(msg):
             ok, job_id, error = _start_background_chat_job(target=target, message=msg)
             if ok:
-                append(
+                append_agent_reply(
                     sender="openclaw",
                     recipient="john",
                     kind="chat",
@@ -827,7 +894,7 @@ class Handler(BaseHTTPRequestHandler):
             def deliver_hermes():
                 r = send_to_hermes(msg)
                 if r.get("ok"):
-                    append(sender="hermes", recipient="john", kind="chat",
+                    append_agent_reply(sender="hermes", recipient="john", kind="chat",
                            content=_humanize_chat_content(r.get("findings", "")))
                 else:
                     append(sender="system", recipient="john", kind="system_event",
@@ -836,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
             def deliver_openclaw():
                 r = send_to_openclaw(msg)
                 if r.get("ok"):
-                    append(sender="openclaw", recipient="john", kind="chat",
+                    append_agent_reply(sender="openclaw", recipient="john", kind="chat",
                            content=_humanize_chat_content(r.get("reply", "")))
                 else:
                     append(sender="system", recipient="john", kind="system_event",

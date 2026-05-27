@@ -29,6 +29,7 @@ if str(SERVICES_ROOT) not in sys.path:
 from chat.db import append  # noqa: E402
 from services.pwa.backend.server import (  # noqa: E402
     _humanize_chat_content,
+    append_agent_reply,
     send_coordinated_both,
     send_to_hermes,
     send_to_openclaw,
@@ -101,14 +102,14 @@ def _deliver_one(target: str, message: str) -> tuple[bool, str]:
         result = send_to_hermes(message, task_id=f"pwa-bg-{int(time.time())}")
         if result.get("ok"):
             reply = _humanize_chat_content(result.get("findings", ""))
-            append(sender="hermes", recipient="john", kind="chat", content=reply)
+            append_agent_reply(sender="hermes", recipient="john", kind="chat", content=reply)
             return True, reply
         return False, result.get("error") or "Hermes background job failed"
 
     result = send_to_openclaw(message)
     if result.get("ok"):
         reply = _humanize_chat_content(result.get("reply", ""))
-        append(sender="openclaw", recipient="john", kind="chat", content=reply)
+        append_agent_reply(sender="openclaw", recipient="john", kind="chat", content=reply)
         return True, reply
     return False, result.get("error") or "OpenClaw background job failed"
 
