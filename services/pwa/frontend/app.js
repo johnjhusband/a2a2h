@@ -9,6 +9,7 @@ const $messages = document.getElementById("messages");
 const $composer = document.getElementById("composer");
 const $input = document.getElementById("input");
 const $enablePush = document.getElementById("enable-push");
+const $pushStatus = document.getElementById("push-status");
 const $voiceToggle = document.getElementById("voice-toggle");
 const $voiceInput = document.getElementById("voice-input");
 const $refreshApp = document.getElementById("refresh-app");
@@ -22,6 +23,12 @@ function authHeaders(extra = {}) {
 function setStatus(text, isError = false) {
   $status.textContent = text;
   $status.classList.toggle("warn", isError);
+}
+
+function setPushStatus(text, isError = false) {
+  if (!$pushStatus) return;
+  $pushStatus.textContent = text;
+  $pushStatus.classList.toggle("warn", isError);
 }
 
 function senderLabel(s) {
@@ -206,34 +213,50 @@ if ("serviceWorker" in navigator) {
 // Push subscribe + self-test (best-effort — works only on browsers that support
 // Web Push with VAPID keys configured server-side). The button stays visible so
 // John can verify the path on demand instead of guessing whether push works.
+async function describePushCapability() {
+  if (!$pushStatus) return;
+  try {
+    if (!("Notification" in window)) { setPushStatus("Notifications are not supported in this browser", true); return; }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) { setPushStatus("Web Push is not supported in this browser", true); return; }
+    const perm = Notification.permission || "default";
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (perm === "granted" && sub) setPushStatus("Ready: this device is subscribed; tap to send a test notification.");
+    else if (perm === "granted") setPushStatus("Permission granted; tap to subscribe and send a test.");
+    else if (perm === "denied") setPushStatus("Permission denied by this browser/device", true);
+    else setPushStatus("Not enabled on this device yet; tap Enable/Test.");
+  } catch (e) { setPushStatus("Push readiness check failed: " + e.message, true); }
+}
+
 async function enablePush() {
   try {
     if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
-      setStatus("push not supported in this browser", true); return;
+      setStatus("push not supported in this browser", true); setPushStatus("Push unsupported here", true); return;
     }
-    setStatus("checking push…");
+    setStatus("checking push…"); setPushStatus("Requesting notification permission…");
     const perm = await Notification.requestPermission();
-    if (perm !== "granted") { setStatus("push permission denied", true); return; }
+    if (perm !== "granted") { setStatus("push permission denied", true); setPushStatus("Permission was not granted", true); return; }
     const reg = await navigator.serviceWorker.ready;
     const vapidResp = await fetch("/api/push/vapid_public_key", { headers: authHeaders() });
     const { public_key } = await vapidResp.json();
-    if (!public_key) { setStatus("server has no VAPID keys yet", true); return; }
+    if (!public_key) { setStatus("server has no VAPID keys yet", true); setPushStatus("Server has no VAPID public key", true); return; }
     const sub = await reg.pushManager.getSubscription() || await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8(public_key),
     });
+    setPushStatus("Device subscribed; sending test notification…");
     const subscribeResp = await fetch("/api/push/subscribe", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ subscription: sub.toJSON() }),
     });
-    if (!subscribeResp.ok) { setStatus(`push subscribe failed: ${subscribeResp.status}`, true); return; }
+    if (!subscribeResp.ok) { setStatus(`push subscribe failed: ${subscribeResp.status}`, true); setPushStatus(`Subscribe failed: HTTP ${subscribeResp.status}`, true); return; }
     const testResp = await fetch("/api/push/test", { method: "POST", headers: authHeaders(), body: "{}" });
-    if (!testResp.ok) { setStatus(`push test failed: ${testResp.status}`, true); return; }
+    if (!testResp.ok) { setStatus(`push test failed: ${testResp.status}`, true); setPushStatus(`Test failed: HTTP ${testResp.status}`, true); return; }
     const test = await testResp.json();
-    if (test.attempted > 0 && test.failed === 0) setStatus("push test sent — watch for the notification");
-    else if (test.attempted > 0) setStatus(`push test attempted with ${test.failed} failure(s)`, true);
-    else setStatus("push subscribed, but server did not attempt delivery", true);
-  } catch (e) { setStatus("push enable failed: " + e.message, true); }
+    if (test.attempted > 0 && test.failed === 0) { setStatus("push test sent — watch for the notification"); setPushStatus("Test sent successfully; watch this device for the notification."); }
+    else if (test.attempted > 0) { setStatus(`push test attempted with ${test.failed} failure(s)`, true); setPushStatus(`Provider attempted delivery with ${test.failed} failure(s)`, true); }
+    else { setStatus("push subscribed, but server did not attempt delivery", true); setPushStatus("Subscribed, but server did not attempt delivery", true); }
+  } catch (e) { setStatus("push enable failed: " + e.message, true); setPushStatus("Push enable failed: " + e.message, true); }
 }
 
 function urlBase64ToUint8(base64) {
@@ -340,6 +363,7 @@ function initToggle($el, name) {
 
 initToggle($toggleA2A, "a2a");
 setupVoiceControls();
+describePushCapability();
 
 // Boot
 loadHistory().then(openStream);
