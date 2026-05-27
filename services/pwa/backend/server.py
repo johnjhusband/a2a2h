@@ -169,6 +169,32 @@ LONG_JOB_RE = re.compile(
 MULTI_STEP_RE = re.compile(r"\b(first|then|after\s+that|finally|multi[-\s]?step|end[-\s]?to[-\s]?end)\b", re.IGNORECASE)
 
 
+
+def _summarize_push_device_status(body: dict[str, Any]) -> dict[str, Any]:
+    """Return a bounded, non-secret snapshot of browser push readiness."""
+    def boolish(name: str) -> bool:
+        return bool(body.get(name))
+    permission = str(body.get("permission") or "unknown")[:40]
+    status_text = str(body.get("status_text") or "")[:240]
+    platform = str(body.get("platform") or "")[:80]
+    user_agent = str(body.get("user_agent") or "")[:240]
+    return {
+        "event": "push_device_status",
+        "notification_supported": boolish("notification_supported"),
+        "service_worker_supported": boolish("service_worker_supported"),
+        "push_supported": boolish("push_supported"),
+        "permission": permission,
+        "subscribed": boolish("subscribed"),
+        "standalone": boolish("standalone"),
+        "manual": boolish("manual"),
+        "after_test": boolish("after_test"),
+        "test_attempted": int(body.get("test_attempted") or 0),
+        "test_failed": int(body.get("test_failed") or 0),
+        "platform": platform,
+        "status_text": status_text,
+        "user_agent_family": user_agent.split(" ", 1)[0] if user_agent else "",
+    }
+
 # ─── SSE broadcaster ────────────────────────────────────────────────────────
 
 class SSEBroadcaster:
@@ -1091,6 +1117,10 @@ class Handler(BaseHTTPRequestHandler):
                 "failed": failed,
             }))
             return self._json(200, {"ok": True, "attempted": attempted, "failed": failed})
+        if path == "/api/push/device_status":
+            summary = _summarize_push_device_status(body)
+            append(sender="system", recipient="human", kind="system_event", content=json.dumps(summary))
+            return self._json(200, {"ok": True, "status": summary})
         return self._json(404, {"error": "not_found"})
 
     def _handle_message_post(self, body: dict):

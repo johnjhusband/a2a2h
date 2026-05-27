@@ -10,6 +10,7 @@ const $composer = document.getElementById("composer");
 const $input = document.getElementById("input");
 const $enablePush = document.getElementById("enable-push");
 const $pushStatus = document.getElementById("push-status");
+const $reportPushStatus = document.getElementById("report-push-status");
 const $voiceToggle = document.getElementById("voice-toggle");
 const $voiceInput = document.getElementById("voice-input");
 const $refreshApp = document.getElementById("refresh-app");
@@ -253,10 +254,49 @@ async function enablePush() {
     const testResp = await fetch("/api/push/test", { method: "POST", headers: authHeaders(), body: "{}" });
     if (!testResp.ok) { setStatus(`push test failed: ${testResp.status}`, true); setPushStatus(`Test failed: HTTP ${testResp.status}`, true); return; }
     const test = await testResp.json();
-    if (test.attempted > 0 && test.failed === 0) { setStatus("push test sent — watch for the notification"); setPushStatus("Test sent successfully; watch this device for the notification."); }
+    if (test.attempted > 0 && test.failed === 0) { setStatus("push test sent — watch for the notification"); setPushStatus("Test sent successfully; watch this device for the notification."); reportPushDeviceStatus({ test_attempted: test.attempted, test_failed: test.failed, after_test: true }); }
     else if (test.attempted > 0) { setStatus(`push test attempted with ${test.failed} failure(s)`, true); setPushStatus(`Provider attempted delivery with ${test.failed} failure(s)`, true); }
     else { setStatus("push subscribed, but server did not attempt delivery", true); setPushStatus("Subscribed, but server did not attempt delivery", true); }
   } catch (e) { setStatus("push enable failed: " + e.message, true); setPushStatus("Push enable failed: " + e.message, true); }
+}
+
+function pushSupportSnapshot(extra = {}) {
+  const snapshot = {
+    notification_supported: "Notification" in window,
+    service_worker_supported: "serviceWorker" in navigator,
+    push_supported: "PushManager" in window,
+    permission: ("Notification" in window) ? Notification.permission : "unsupported",
+    user_agent: navigator.userAgent || "",
+    platform: navigator.platform || "",
+    standalone: !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches),
+    ...extra,
+  };
+  return snapshot;
+}
+
+async function reportPushDeviceStatus(extra = {}) {
+  if (!$reportPushStatus) return;
+  try {
+    $reportPushStatus.disabled = true;
+    setPushStatus("Reporting this device's push readiness…");
+    let subscribed = false;
+    if (("serviceWorker" in navigator) && ("PushManager" in window)) {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        subscribed = !!(await reg.pushManager.getSubscription());
+      } catch (e) { extra.subscription_check_error = e.message; }
+    }
+    const payload = pushSupportSnapshot({ subscribed, status_text: $pushStatus ? $pushStatus.textContent : "", ...extra });
+    const r = await fetch("/api/push/device_status", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(payload),
+    });
+    if (!r.ok) { setPushStatus(`Status report failed: HTTP ${r.status}`, true); return; }
+    setPushStatus("Device push readiness was written to the chat log.");
+  } catch (e) {
+    setPushStatus("Status report failed: " + e.message, true);
+  } finally {
+    $reportPushStatus.disabled = false;
+  }
 }
 
 function urlBase64ToUint8(base64) {
@@ -269,6 +309,7 @@ function urlBase64ToUint8(base64) {
 }
 
 $enablePush.addEventListener("click", enablePush);
+if ($reportPushStatus) $reportPushStatus.addEventListener("click", () => reportPushDeviceStatus({ manual: true }));
 
 async function refreshAppShell() {
   try {
