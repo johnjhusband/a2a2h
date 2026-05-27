@@ -56,7 +56,7 @@ from typing import Any, Optional
 # Path is /opt/a2a2h/services/pwa/backend/server.py — add /opt/a2a2h/services so
 # we can import the `chat` package alongside the sidecars (matching their style).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from chat.db import append, tail, log_a2a_request, log_a2a_response  # noqa: E402
+from chat.db import append, tail, log_a2a_request, log_a2a_response, clone_chat_isolation_error  # noqa: E402
 
 # ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -92,12 +92,29 @@ VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:admin@example.com")
 
 PWA_JOB_PAYLOAD_DIR = Path(os.environ.get("PWA_JOB_PAYLOAD_DIR", "/opt/a2a2h/.cache/pwa-jobs/payloads"))
 PWA_JOB_RUNNER = Path(os.environ.get("PWA_JOB_RUNNER", str(Path(__file__).resolve().parent / "job_runner.py")))
+A2A2H_ROOT = os.environ.get("A2A2H_ROOT", "/opt/a2a2h")
+A2A2H_INSTANCE_ID = os.environ.get("A2A2H_INSTANCE_ID", "production")
+CHAT_DB_PATH = os.environ.get("CHAT_DB", "/opt/a2a2h/chat.db")
+
+
+def _clone_chat_isolation_error(*, instance_id: str, chat_db: str, a2a2h_root: str) -> str | None:
+    return clone_chat_isolation_error(instance_id=instance_id, chat_db=chat_db, a2a2h_root=a2a2h_root)
+
+
+def _assert_clone_chat_isolation() -> None:
+    error = _clone_chat_isolation_error(instance_id=A2A2H_INSTANCE_ID, chat_db=CHAT_DB_PATH, a2a2h_root=A2A2H_ROOT)
+    if error:
+        raise RuntimeError(error)
+
+
+_assert_clone_chat_isolation()
 
 LONG_JOB_RE = re.compile(
     r"\b(implement|build|create|add|wire|install|upgrade|deploy|research|audit|investigate|diagnos(?:e|is)|debug|fix|repair|patch|refactor|run\s+tests?|test|document|analy[sz]e|background|long[-\s]?running|report\s+back|when\s+(you('|’)re|you\s+are)\s+done)\b",
     re.IGNORECASE,
 )
 MULTI_STEP_RE = re.compile(r"\b(first|then|after\s+that|finally|multi[-\s]?step|end[-\s]?to[-\s]?end)\b", re.IGNORECASE)
+
 
 # ─── SSE broadcaster ────────────────────────────────────────────────────────
 
@@ -739,6 +756,14 @@ class Handler(BaseHTTPRequestHandler):
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    isolation_error = _clone_chat_isolation_error(
+        instance_id=A2A2H_INSTANCE_ID,
+        chat_db=CHAT_DB_PATH,
+        a2a2h_root=A2A2H_ROOT,
+    )
+    if isolation_error:
+        sys.stderr.write(f"FATAL: {isolation_error}\n")
+        sys.exit(2)
     if not PWA_AUTH_TOKEN:
         sys.stderr.write("WARN: PWA_AUTH_TOKEN not set — running without auth (dev only)\n")
     append(sender="system", kind="system_event",
