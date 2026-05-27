@@ -758,6 +758,8 @@ class Handler(BaseHTTPRequestHandler):
         # BaseHTTPRequestHandler logs the full request target by default; redact
         # URL-carried credentials from legacy clients before systemd captures it.
         message = fmt % args
+        if re.search(r'"GET /api/stream\?[^" ]*\btoken=', message) and '" 204 ' in message:
+            return
         message = re.sub(r"([?&](?:token|access_token|auth|key)=)[^\s&\"]+", r"\1[REDACTED]", message)
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), message))
 
