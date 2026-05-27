@@ -3,7 +3,7 @@
 // Bump SHELL_CACHE when shipping any change to index.html / app.js / style.css.
 // The activate handler deletes any cache != current, so the bump is the only
 // thing the user needs for an update to take effect on next page load.
-const SHELL_CACHE = "a2a2h-shell-v20";
+const SHELL_CACHE = "a2a2h-shell-v21";
 const SHELL_FILES = ["/", "/index.html", "/static/app.js", "/static/style.css", "/manifest.json", "/static/icon-192.png", "/static/icon-512.png"];
 const SHELL_PATHS = new Set(SHELL_FILES);
 

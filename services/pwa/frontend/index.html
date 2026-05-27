@@ -14,7 +14,10 @@
   <header class="topbar">
     <h1>A2A2H</h1>
     <div class="status" id="status">connecting…</div>
-    <button id="refresh-app" title="Refresh the installed PWA shell and reload latest features">Update app</button>
+    <div class="header-actions">
+      <label class="header-toggle" title="Show agent coordination traffic inline with chat"><input type="checkbox" id="toggle-a2a" /> Show agent coordination</label>
+      <button id="refresh-app" title="Refresh the installed PWA shell and reload latest features">Update app</button>
+    </div>
   </header>
   <section class="feature-panel" aria-label="PWA improvements">
     <div class="feature-card">
@@ -29,8 +32,8 @@
     </div>
     <div class="feature-card">
       <div class="feature-title"><strong>Agent coordination</strong><span class="feature-status live">Live</span></div>
-      <span>Show OpenClaw ↔ Hermes handoffs inline.</span>
-      <label class="inline-toggle"><input type="checkbox" id="toggle-a2a" /> Show</label>
+      <span>Use the header toggle to show agent handoffs inline.</span>
+      <span class="feature-detail">Renders capability, summarized findings, and collapsible raw JSON.</span>
     </div>
     <div class="feature-card">
       <div class="feature-title"><strong>Chat history</strong><span class="feature-status live">Live</span></div>
@@ -52,7 +55,7 @@
     <strong>Feature request status:</strong>
     <span>chat log + coordination transcript are live now;</span>
     <span>push now shows device readiness and sends a test notification from this button.</span>
-    <span class="app-version">Updated 2026-05-27 11:45 UTC · shell v19</span>
+    <span class="app-version">Updated 2026-05-27 11:55 UTC · shell v21</span>
     <a href="/chat-log/" target="_blank" rel="noopener">Review full logs</a>
     <details class="release-notes">
       <summary>What changed today</summary>

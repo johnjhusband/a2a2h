@@ -28,6 +28,23 @@ body { display: flex; flex-direction: column; min-height: 0; }
 }
 .topbar h1 { margin: 0; font-size: 1.1em; font-weight: 600; }
 .topbar .status { font-size: 0.85em; color: var(--muted); flex: 1; }
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.header-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--accent);
+  font-size: 0.84rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.header-toggle input { margin: 0; }
 .topbar-link {
   color: var(--accent); text-decoration: none; font-size: 0.85em;
   font-weight: 650; white-space: nowrap;
