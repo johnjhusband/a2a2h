@@ -1,33 +1,17 @@
 // A2A2H PWA frontend — chat client.
-// On first visit with ?token=… on the URL, save token to localStorage and
-// strip it from the URL. All subsequent API calls include it as Bearer.
+// Auth uses a Secure/HttpOnly session cookie set by the backend bootstrap redirect.
+// API calls rely on same-origin cookies; no token is stored in JavaScript.
 // Live message stream via Server-Sent Events. New messages render with
 // sender-coloured borders; A2A traffic shown distinctly (kind="a2a_*").
 
-const STORAGE_KEY = "a2a2h_pwa_token";
 const $status = document.getElementById("status");
 const $messages = document.getElementById("messages");
 const $composer = document.getElementById("composer");
 const $input = document.getElementById("input");
 const $enablePush = document.getElementById("enable-push");
 
-function token() { return localStorage.getItem(STORAGE_KEY) || ""; }
-
-function captureTokenFromUrl() {
-  const url = new URL(window.location.href);
-  const t = url.searchParams.get("token");
-  if (t) {
-    localStorage.setItem(STORAGE_KEY, t);
-    url.searchParams.delete("token");
-    window.history.replaceState({}, "", url.toString());
-  }
-}
-
 function authHeaders(extra = {}) {
-  const h = { "Content-Type": "application/json", ...extra };
-  const t = token();
-  if (t) h["Authorization"] = `Bearer ${t}`;
-  return h;
+  return { "Content-Type": "application/json", ...extra };
 }
 
 function setStatus(text, isError = false) {
@@ -96,7 +80,7 @@ let lastSeenId = 0;
 async function loadHistory() {
   try {
     const r = await fetch(`/api/messages?since_id=0`, { headers: authHeaders() });
-    if (r.status === 401) { setStatus("unauthorized — refresh URL with ?token=", true); return; }
+    if (r.status === 401) { setStatus("unauthorized — open the private login URL again", true); return; }
     if (!r.ok) { setStatus(`history HTTP ${r.status}`, true); return; }
     const data = await r.json();
     (data.messages || []).forEach(m => { appendMessage(m); lastSeenId = Math.max(lastSeenId, m.id); });
@@ -104,9 +88,7 @@ async function loadHistory() {
 }
 
 function openStream() {
-  if (!token()) { setStatus("no token — visit with ?token=…", true); return; }
-  // EventSource doesn't support custom headers, so we pass token as query.
-  const es = new EventSource(`/api/stream?token=${encodeURIComponent(token())}`);
+  const es = new EventSource("/api/stream");
   es.onopen = () => setStatus("connected");
   es.onerror = () => { setStatus("stream disconnected — reconnecting…", true); es.close(); setTimeout(openStream, 3000); };
   es.onmessage = (ev) => {
@@ -202,9 +184,5 @@ initToggle($toggleA2A, "a2a");
 initToggle($toggleJSON, "json");
 
 // Boot
-captureTokenFromUrl();
-if (!token()) { setStatus("no token saved — visit with ?token=… once", true); }
-else {
-  loadHistory().then(openStream);
-  if ("Notification" in window && Notification.permission === "default") $enablePush.hidden = false;
-}
+loadHistory().then(openStream);
+if ("Notification" in window && Notification.permission === "default") $enablePush.hidden = false;

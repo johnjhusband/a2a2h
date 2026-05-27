@@ -11,10 +11,10 @@ Serves the PWA frontend at /, plus a JSON API:
   GET  /api/push/vapid_public_key → return server's VAPID public key
   GET  /api/health                → health check
 
-Auth: Bearer token in Authorization header. Token is `PWA_AUTH_TOKEN` set at
-install time. On first visit, browser receives the token via URL query, saves
-to localStorage, strips from URL, and sends in subsequent Authorization
-headers.
+Auth: HttpOnly session cookie. Token is `PWA_AUTH_TOKEN` set at install
+time. A first visit may include `?token=...` only on the PWA shell route; the
+server immediately exchanges it for a Secure/HttpOnly cookie and redirects to
+a clean URL. API endpoints never accept URL query tokens.
 
 Routing of the human user's outbound messages:
   - Starts with "@hermes " (case-insensitive) → POST to Hermes A2A sidecar
@@ -37,6 +37,7 @@ gracefully degrades to no-push).
 """
 from __future__ import annotations
 import ast
+import hmac
 import json
 import os
 import queue
@@ -48,6 +49,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -576,19 +578,55 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    SESSION_COOKIE_NAME = "a2a2h_pwa_session"
+
+    def _cookie_value(self, name: str) -> str:
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            if "=" not in part:
+                continue
+            key, value = part.strip().split("=", 1)
+            if key == name:
+                return urllib.parse.unquote(value)
+        return ""
+
+    def _query_param(self, name: str) -> str:
+        parsed = urllib.parse.urlsplit(self.path)
+        values = urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get(name, [])
+        return values[0] if values else ""
+
+    def _session_cookie_header(self) -> str:
+        return (
+            f"{self.SESSION_COOKIE_NAME}={urllib.parse.quote(PWA_AUTH_TOKEN, safe='')}; "
+            "Path=/; HttpOnly; Secure; SameSite=Strict"
+        )
+
     def _auth_ok(self) -> bool:
         if not PWA_AUTH_TOKEN:
             return True  # auth disabled (dev mode)
-        auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            return auth[len("Bearer "):] == PWA_AUTH_TOKEN
-        # Allow ?token= for initial bootstrap
-        if self.path:
-            qs = self.path.split("?", 1)[-1] if "?" in self.path else ""
-            for kv in qs.split("&"):
-                if kv.startswith("token="):
-                    return kv[len("token="):] == PWA_AUTH_TOKEN
-        return False
+        cookie_token = self._cookie_value(self.SESSION_COOKIE_NAME)
+        return bool(cookie_token) and hmac.compare_digest(cookie_token, PWA_AUTH_TOKEN)
+
+    def _maybe_bootstrap_session(self, path: str) -> bool:
+        """Exchange ?token= for a session cookie only on PWA shell routes."""
+        if not PWA_AUTH_TOKEN or path not in ("/", "/index.html"):
+            return False
+        supplied = self._query_param("token")
+        if not supplied:
+            return False
+        if not hmac.compare_digest(supplied, PWA_AUTH_TOKEN):
+            return False
+
+        parsed = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        clean_query = urllib.parse.urlencode([(k, v) for k, v in query if k != "token"])
+        location = urllib.parse.urlunsplit(("", "", parsed.path or "/", clean_query, parsed.fragment))
+        self.send_response(303)
+        self.send_header("Location", location or "/")
+        self.send_header("Set-Cookie", self._session_cookie_header())
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return True
 
     # Routes
     # Paths served WITHOUT auth — the PWA shell must bootstrap before the JS
@@ -602,6 +640,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if self._maybe_bootstrap_session(path):
+            return
         if path == "/api/health":
             return self._json(200, {"status": "ok", "service": "pwa-backend"})
         # Public paths skip auth; API paths still require it
