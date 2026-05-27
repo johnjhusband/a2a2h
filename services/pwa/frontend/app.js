@@ -131,6 +131,12 @@ async function loadHistory({ replace = false } = {}) {
   finally { historyInFlight = false; }
 }
 
+function reloadFullHistory() {
+  // Foregrounded mobile PWAs can have a dead EventSource and stale in-memory
+  // DOM. Re-read the canonical chat.db mirror through /api/messages?since_id=0.
+  return loadHistory({ replace: true });
+}
+
 function openStream() {
   const es = new EventSource("/api/stream");
   es.onopen = () => setStatus("connected");
@@ -208,9 +214,9 @@ $enablePush.addEventListener("click", enablePush);
 // reload the canonical chat.db history so missed messages appear even if the
 // live stream never delivered them to this page instance.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") loadHistory({ replace: true });
+  if (document.visibilityState === "visible") reloadFullHistory();
 });
-window.addEventListener("focus", () => loadHistory({ replace: true }));
+window.addEventListener("focus", reloadFullHistory);
 
 // ─── Toggles ─────────────────────────────────────────────────────────────
 // The coordination toggle adds .show-a2a to the body. A2A rows stay hidden by
