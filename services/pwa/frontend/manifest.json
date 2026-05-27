@@ -1,7 +1,7 @@
 {
-  "name": "CTO",
-  "short_name": "CTO",
-  "description": "Chief Technology Officer — autonomous AI agent. Chat with OpenClaw (decision-maker) and Hermes (executor) from anywhere.",
+  "name": "A2A2H",
+  "short_name": "A2A2H",
+  "description": "Agent-to-Agent-to-Human chat bridge. Chat with OpenClaw (decision-maker) and Hermes (executor) from anywhere.",
   "start_url": "/",
   "display": "standalone",
   "orientation": "any",

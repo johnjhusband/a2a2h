@@ -1,8 +1,8 @@
 [Unit]
-Description=CTO prompt-cache keep-alive (pings live sessions to avoid cold re-bootstrap)
+Description=A2A2H prompt-cache keep-alive (pings live sessions to avoid cold re-bootstrap)
 
 [Service]
 Type=oneshot
-ExecStart=/opt/cto/scripts/cache-keepalive.sh
+ExecStart=/opt/a2a2h/scripts/cache-keepalive.sh
 StandardOutput=journal
 StandardError=journal

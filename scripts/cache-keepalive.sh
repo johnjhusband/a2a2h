@@ -7,7 +7,7 @@
 # we only send a one-word prompt. The point is to keep OpenAIs prompt cache
 # and Hermes server-side session state from going cold so subsequent real
 # messages do not pay another ~45K bootstrap re-warm.
-# Wired by scripts/install-cto.sh and run via systemd timer cache-keepalive.timer.
+# Wired by scripts/install-a2a2h.sh and run via systemd timer cache-keepalive.timer.
 set -e
 PATH=$HOME/.local/bin:$HOME/.hermes/hermes-agent/venv/bin:$PATH
 TS=$(date -Iseconds)
@@ -18,8 +18,8 @@ timeout 90 openclaw agent --agent main --session-id pwa-john-main \
   --thinking off --json --timeout 60 >/dev/null 2>&1 || echo "openclaw ping failed"
 
 # Hermes human session — POST through the sidecar so we exercise the real path
-PWA_TOKEN=$(grep "^PWA_AUTH_TOKEN=" /opt/cto/.env | cut -d= -f2)
-HERMES_A2A_TOKEN=$(grep "^HERMES_A2A_TOKEN=" /opt/cto/.env | cut -d= -f2)
+PWA_TOKEN=$(grep "^PWA_AUTH_TOKEN=" /opt/a2a2h/.env | cut -d= -f2)
+HERMES_A2A_TOKEN=$(grep "^HERMES_A2A_TOKEN=" /opt/a2a2h/.env | cut -d= -f2)
 curl -sS --max-time 30 -X POST http://127.0.0.1:8643/a2a/ \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $HERMES_A2A_TOKEN" \

@@ -1,9 +1,9 @@
-// CTO PWA service worker — minimal: caches the app shell for offline launch +
+// A2A2H PWA service worker — minimal: caches the app shell for offline launch +
 // handles Web Push events (delivered by the backend via pywebpush when wired).
 // Bump SHELL_CACHE when shipping any change to index.html / app.js / style.css.
 // The activate handler deletes any cache != current, so the bump is the only
 // thing the user needs for an update to take effect on next page load.
-const SHELL_CACHE = "cto-shell-v2";
+const SHELL_CACHE = "a2a2h-shell-v2";
 const SHELL_FILES = ["/", "/index.html", "/static/app.js", "/static/style.css", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
@@ -40,17 +40,17 @@ self.addEventListener("fetch", (event) => {
 });
 
 self.addEventListener("push", (event) => {
-  let data = { title: "CTO", body: "New activity" };
+  let data = { title: "A2A2H", body: "New activity" };
   try { if (event.data) data = event.data.json(); } catch (e) {}
   const options = {
     body: data.body || "",
     icon: "/static/icon-192.png",
     badge: "/static/icon-192.png",
-    tag: data.tag || "cto",
+    tag: data.tag || "a2a2h",
     data: { url: data.url || "/" },
     requireInteraction: !!data.requireInteraction,
   };
-  event.waitUntil(self.registration.showNotification(data.title || "CTO", options));
+  event.waitUntil(self.registration.showNotification(data.title || "A2A2H", options));
 });
 
 self.addEventListener("notificationclick", (event) => {

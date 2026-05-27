@@ -1,5 +1,5 @@
 """
-Shared chat persistence for CTO.
+Shared chat persistence for A2A2H.
 
 Schema is intentionally minimal — every message is one row. Senders are agents
 or "john". Kinds distinguish chat messages from A2A protocol traffic so the PWA
@@ -21,7 +21,7 @@ import json
 from typing import Optional, Iterable
 from contextlib import contextmanager
 
-CHAT_DB_PATH = os.environ.get("CHAT_DB", "/opt/cto/chat.db")
+CHAT_DB_PATH = os.environ.get("CHAT_DB", "/opt/a2a2h/chat.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (

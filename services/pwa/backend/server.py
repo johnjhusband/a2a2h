@@ -5,7 +5,7 @@ PWA backend — bridges the browser to OpenClaw and Hermes.
 Serves the PWA frontend at /, plus a JSON API:
 
   GET  /api/messages?since_id=N  → message history
-  POST /api/messages              → send message from John (routes by @-mention)
+  POST /api/messages              → send message from human user (routes by @-mention)
   GET  /api/stream                → Server-Sent Events stream of new messages
   POST /api/push/subscribe        → register browser for Web Push (subscription stored)
   GET  /api/push/vapid_public_key → return server's VAPID public key
@@ -16,10 +16,13 @@ install time. On first visit, browser receives the token via URL query, saves
 to localStorage, strips from URL, and sends in subsequent Authorization
 headers.
 
-Routing of John's outbound messages:
+Routing of the human user's outbound messages:
   - Starts with "@hermes " (case-insensitive) → POST to Hermes A2A sidecar
-  - Starts with "@openclaw " or no @-mention → run the real OpenClaw agent via
-    the OpenClaw gateway-backed CLI session (not a raw model/capability fallback)
+  - Starts with "@openclaw " → run the real OpenClaw agent via the gateway-backed
+    CLI session (not a raw model/capability fallback)
+  - No @-mention → small content-aware router: Hermes-targeted language goes to
+    Hermes, greetings/both-hemisphere prompts go to both, everything else defaults
+    to OpenClaw as orchestrator.
 
 Implementation: pure stdlib http.server + threading. SSE via long-running
 generator response. Push notifications stored as DB rows for now (sending push
@@ -44,7 +47,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 
-# Path is /opt/cto/services/pwa/backend/server.py — add /opt/cto/services so
+# Path is /opt/a2a2h/services/pwa/backend/server.py — add /opt/a2a2h/services so
 # we can import the `chat` package alongside the sidecars (matching their style).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from chat.db import append, tail, log_a2a_request, log_a2a_response  # noqa: E402
@@ -66,15 +69,15 @@ OPENCLAW_MODEL = os.environ.get("OPENCLAW_MODEL", "openai-codex/gpt-5.5")
 OPENCLAW_SESSION_ID = os.environ.get("OPENCLAW_SESSION_ID", "pwa-john-main")
 
 HUMAN_CHAT_STYLE = (
-    "Audience: John Husband in the PWA chat. Reply in plain conversational English. "
+    "Audience: a human user in the PWA chat. Reply in plain conversational English. "
     "Do not return JSON, YAML, markdown tables, schema blocks, or agent findings. "
     "Avoid bullet lists unless John explicitly asks for a list. If you used tools or "
     "delegated work, summarize the result naturally."
 )
 
-VAPID_PUBLIC_KEY_FILE = Path(os.environ.get("VAPID_PUBLIC_KEY_FILE", "/opt/cto/.vapid/public.pem"))
-VAPID_PRIVATE_KEY_FILE = Path(os.environ.get("VAPID_PRIVATE_KEY_FILE", "/opt/cto/.vapid/private.pem"))
-VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:john@husband.llc")
+VAPID_PUBLIC_KEY_FILE = Path(os.environ.get("VAPID_PUBLIC_KEY_FILE", "/opt/a2a2h/.vapid/public.pem"))
+VAPID_PRIVATE_KEY_FILE = Path(os.environ.get("VAPID_PRIVATE_KEY_FILE", "/opt/a2a2h/.vapid/private.pem"))
+VAPID_EMAIL = os.environ.get("VAPID_EMAIL", "mailto:admin@example.com")
 
 # ─── SSE broadcaster ────────────────────────────────────────────────────────
 
@@ -137,6 +140,14 @@ BROADCASTER = SSEBroadcaster()
 # ─── Routing logic ──────────────────────────────────────────────────────────
 
 MENTION_RE = re.compile(r"^\s*@(openclaw|hermes)\b\s*", re.IGNORECASE)
+GREETING_RE = re.compile(r"^\s*(hi|hello|hey|yo|gm|good\s+(morning|afternoon|evening))\b[\s!.?]*$", re.IGNORECASE)
+HERMES_ADDRESS_RE = re.compile(r"\b(hermes|right\s+hemisphere)\b", re.IGNORECASE)
+OPENCLAW_ADDRESS_RE = re.compile(r"\b(openclaw|left\s+hemisphere)\b", re.IGNORECASE)
+BOTH_ADDRESS_RE = re.compile(r"\b(both\s+(of\s+you|agents|hemispheres)|you\s+both|openclaw\s+and\s+hermes|hermes\s+and\s+openclaw)\b", re.IGNORECASE)
+OPENCLAW_ORCHESTRATION_RE = re.compile(
+    r"\b(fix|debug|repair|diagnos(e|is)|investigate|patch|restart|deploy|wire|route|why\s+(did|is|are|was|were)|what\s+happened)\b",
+    re.IGNORECASE,
+)
 
 _HUMAN_FIELD_PRIORITY = (
     "reply", "answer", "message", "response", "simplified_response", "final",
@@ -226,12 +237,24 @@ def _humanize_chat_content(text: str) -> str:
     return rendered or stripped
 
 def parse_mention(text: str) -> tuple[str, str]:
-    """Return (target, stripped_text). Target is 'openclaw' or 'hermes'."""
+    """Return (target, stripped_text). Target is 'openclaw', 'hermes', or 'both'."""
     m = MENTION_RE.match(text)
     if m:
         target = m.group(1).lower()
         stripped = text[m.end():].strip()
         return target, stripped
+    # Content-aware no-mention routing. Keep this deterministic and conservative:
+    # OpenClaw remains the default orchestrator for repairs, decisions, and ambiguous
+    # work; Hermes receives messages that are clearly addressed to Hermes; greetings
+    # are sent to both so John can immediately see whether both routes are alive.
+    if GREETING_RE.match(text) or BOTH_ADDRESS_RE.search(text):
+        return "both", text
+    if HERMES_ADDRESS_RE.search(text):
+        if OPENCLAW_ADDRESS_RE.search(text) or OPENCLAW_ORCHESTRATION_RE.search(text):
+            return "openclaw", text
+        return "hermes", text
+    if OPENCLAW_ADDRESS_RE.search(text):
+        return "openclaw", text
     return "openclaw", text  # default: OpenClaw is the left-hemisphere router/orchestrator
 
 def send_to_hermes(text: str, task_id: Optional[str] = None) -> dict:
@@ -316,7 +339,7 @@ def send_to_openclaw(text: str) -> dict:
     Routes to `openclaw agent` (gateway transport) with a stable session id so
     SOUL.md / AGENTS.md / IDENTITY.md / skills / memory are loaded and the prompt
     cache stays warm across PWA turns. The earlier HTTP and model.run paths were
-    removed — they were bare LLM completions, not agent runs (see CTO-DECISION-013
+    removed — they were bare LLM completions, not agent runs (see A2A2H-DECISION-013
     follow-up: PWA OpenClaw routing fix).
     """
     human_message = f"{HUMAN_CHAT_STYLE}\n\nJohn says: {text}"
@@ -339,8 +362,8 @@ def send_to_openclaw(text: str) -> dict:
             capture_output=True,
             text=True,
             timeout=210,
-            cwd="/opt/cto",
-            env={**os.environ, "HOME": os.environ.get("HOME", "/home/cto")},
+            cwd="/opt/a2a2h",
+            env={**os.environ, "HOME": os.environ.get("HOME", "/home/a2a2h")},
         )
         combined = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
         if r.returncode != 0:
@@ -464,7 +487,7 @@ class Handler(BaseHTTPRequestHandler):
                    content=json.dumps({"event": "push_subscribed", "endpoint_host":
                                        (sub.get("endpoint","") or "")[:60]}))
             # Persist subscription
-            sub_dir = Path("/opt/cto/.cache/push-subscriptions"); sub_dir.mkdir(parents=True, exist_ok=True)
+            sub_dir = Path("/opt/a2a2h/.cache/push-subscriptions"); sub_dir.mkdir(parents=True, exist_ok=True)
             fname = sub_dir / (uuid.uuid4().hex + ".json")
             fname.write_text(json.dumps(sub))
             return self._json(200, {"ok": True})
@@ -475,28 +498,39 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             return self._json(400, {"error": "empty_message"})
 
-        # Persist John's message for chat history
+        # Persist the human user's message for chat history
         target, stripped = parse_mention(text)
         append(sender="john", recipient=target, kind="chat", content=text)
 
         # Spawn worker so we can return 202 immediately and let SSE deliver the reply
         def worker():
-            if target == "hermes":
-                r = send_to_hermes(stripped or text)
+            msg = stripped or text
+
+            def deliver_hermes():
+                r = send_to_hermes(msg)
                 if r.get("ok"):
                     append(sender="hermes", recipient="john", kind="chat",
                            content=_humanize_chat_content(r.get("findings", "")))
                 else:
                     append(sender="system", recipient="john", kind="system_event",
                            content=json.dumps({"event": "hermes_send_timeout" if "timed out" in (r.get("error") or "") else "hermes_send_failed", "error": r.get("error")}))
-            else:  # openclaw or default
-                r = send_to_openclaw(stripped or text)
+
+            def deliver_openclaw():
+                r = send_to_openclaw(msg)
                 if r.get("ok"):
                     append(sender="openclaw", recipient="john", kind="chat",
                            content=_humanize_chat_content(r.get("reply", "")))
                 else:
                     append(sender="system", recipient="john", kind="system_event",
                            content=json.dumps({"event": "openclaw_send_failed", "error": r.get("error")}))
+
+            if target == "hermes":
+                deliver_hermes()
+            elif target == "both":
+                threading.Thread(target=deliver_openclaw, daemon=True).start()
+                threading.Thread(target=deliver_hermes, daemon=True).start()
+            else:  # openclaw or default
+                deliver_openclaw()
 
         threading.Thread(target=worker, daemon=True).start()
         return self._json(202, {"accepted": True, "target": target})

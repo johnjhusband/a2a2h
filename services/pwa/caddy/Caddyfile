@@ -1,16 +1,16 @@
-# Caddy config for the CTO PWA at cto.husband.llc.
+# Caddy config for the A2A2H PWA at {$A2A2H_HOST}.
 # Auto-provisions a Let's Encrypt certificate.
 # Proxies all traffic to the PWA backend listening on 127.0.0.1:8088.
 # SSE/EventSource needs the long-running response support Caddy gives by default.
 #
 # Install location: /etc/caddy/Caddyfile (system Caddy service)
-# Or load via `caddy run --config /opt/cto/services/pwa/caddy/Caddyfile`.
+# Or load via `caddy run --config /opt/a2a2h/services/pwa/caddy/Caddyfile`.
 
 {
-    email john@husband.llc
+    email admin@example.com
 }
 
-cto.husband.llc {
+{$A2A2H_HOST:localhost} {
     encode gzip zstd
 
     # Generous timeouts for SSE; backend keepalives are 15s
@@ -32,7 +32,7 @@ cto.husband.llc {
 
     # Structured access logging (rotates daily via Caddy default)
     log {
-        output file /var/log/caddy/cto-access.log
+        output file /var/log/caddy/a2a2h-access.log
         format json
     }
 }

@@ -16,7 +16,7 @@ Accepts requests from:
 All requests + responses are logged to the shared chat DB so the PWA renders
 inter-hemisphere traffic alongside user-facing messages.
 
-Run as systemd user service: cto-hermes-a2a-sidecar.service
+Run as systemd user service: a2a2h-hermes-a2a-sidecar.service
 Listens loopback only by default. Public exposure goes through Caddy + PWA backend.
 
 Implementation: pure stdlib http.server (no fastapi dependency — PEP 668-friendly).
@@ -67,7 +67,7 @@ def _build_hermes_messages(capability: str, inputs: dict, success_criteria: str,
             if key not in {"message", "audience", "response_style"}
         } if isinstance(inputs, dict) else {}
         system_prompt = (
-            "You are Hermes, the right hemisphere of CTO, speaking directly to "
+            "You are Hermes, the right hemisphere of A2A2H, speaking directly to "
             "John in the PWA chat. Respond in plain conversational English. Do "
             "not return JSON, YAML, markdown schema blocks, or agent findings. "
             "Do not use an A2A structured-data contract for this reply. Keep it "
@@ -102,7 +102,7 @@ def _build_hermes_messages(capability: str, inputs: dict, success_criteria: str,
         ),
     }
     return [
-        {"role": "system", "content": "You are Hermes, the right hemisphere of CTO. Respond per HERMES_ROLE.md."},
+        {"role": "system", "content": "You are Hermes, the right hemisphere of A2A2H. Respond per HERMES_ROLE.md."},
         {"role": "user", "content": json.dumps(user_payload)},
     ]
 

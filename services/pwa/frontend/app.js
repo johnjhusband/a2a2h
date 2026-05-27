@@ -1,10 +1,10 @@
-// CTO PWA frontend — chat client.
+// A2A2H PWA frontend — chat client.
 // On first visit with ?token=… on the URL, save token to localStorage and
 // strip it from the URL. All subsequent API calls include it as Bearer.
 // Live message stream via Server-Sent Events. New messages render with
 // sender-coloured borders; A2A traffic shown distinctly (kind="a2a_*").
 
-const STORAGE_KEY = "cto_pwa_token";
+const STORAGE_KEY = "a2a2h_pwa_token";
 const $status = document.getElementById("status");
 const $messages = document.getElementById("messages");
 const $composer = document.getElementById("composer");
