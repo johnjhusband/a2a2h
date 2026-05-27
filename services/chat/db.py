@@ -83,13 +83,20 @@ def append(
         return int(cur.lastrowid or 0)
 
 def tail(since_id: int = 0, limit: int = 200, path: str = CHAT_DB_PATH) -> list[dict]:
-    """Return messages with id > since_id, oldest first. Caller polls or uses WS."""
+    """Return up to `limit` messages with id > since_id, oldest first.
+
+    Implements true tail semantics: when the table has more than `limit`
+    matching rows, this returns the LATEST `limit` rows (in oldest-first
+    order), not the earliest. Critical for PWA first-load — clients pass
+    since_id=0 expecting recent history, not msgs 1-N from days ago.
+    """
     with connection(path) as conn:
         rows = conn.execute(
             "SELECT id, ts, sender, recipient, kind, correlation, content "
-            "FROM messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+            "FROM messages WHERE id > ? ORDER BY id DESC LIMIT ?",
             (since_id, limit),
         ).fetchall()
+    rows = list(reversed(rows))
     return [
         {"id": r[0], "ts": r[1], "sender": r[2], "recipient": r[3],
          "kind": r[4], "correlation": r[5], "content": r[6]}
