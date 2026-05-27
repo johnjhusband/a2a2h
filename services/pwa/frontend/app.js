@@ -397,17 +397,20 @@ async function autoReportDailyDeviceReadiness() {
   const day = new Date().toISOString().slice(0, 10);
   const key = "pwa-device-readiness-auto-report-day";
   if (localStorage.getItem(key) === day) return;
-  localStorage.setItem(key, day);
+  let reported = false;
   try {
-    await fetch("/api/push/device_status", {
+    const r = await fetch("/api/push/device_status", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(await currentPushSubscriptionState({ auto_daily: true })),
     });
+    reported = reported || r.ok;
   } catch (e) {}
   try {
-    await fetch("/api/voice/device_status", {
+    const r = await fetch("/api/voice/device_status", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(voiceSupportSnapshot({ auto_daily: true })),
     });
+    reported = reported || r.ok;
   } catch (e) {}
+  if (reported) localStorage.setItem(key, day);
 }
 
 function setupVoiceControls() {
