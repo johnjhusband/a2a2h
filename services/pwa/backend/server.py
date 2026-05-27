@@ -362,7 +362,7 @@ def _send_push_notification(*, sender: str, body: str, correlation: str | None =
             webpush(
                 subscription_info=subscription,
                 data=payload,
-                vapid_private_key=VAPID_PRIVATE_KEY_FILE.read_text().strip(),
+                vapid_private_key=str(VAPID_PRIVATE_KEY_FILE),
                 vapid_claims={"sub": VAPID_EMAIL},
             )
             attempted += 1
