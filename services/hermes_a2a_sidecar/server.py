@@ -198,8 +198,19 @@ class Handler(BaseHTTPRequestHandler):
                 session_id = HERMES_HUMAN_SESSION_ID
                 session_key = HERMES_HUMAN_SESSION_KEY
             else:
-                session_id = HERMES_AGENT_SESSION_ID
-                session_key = HERMES_AGENT_SESSION_KEY
+                # Agent-to-agent delegations are work units, not an ongoing chat.
+                # Reusing one persistent Hermes API session caused the transcript
+                # to grow past the compression threshold (~250k tokens), which in
+                # turn made short health/delegation calls time out during preflight
+                # context summarization. Keep the configured prefix for traceability
+                # but isolate each task in its own session so delegation latency does
+                # not degrade over time.
+                compact_task_id = task_id.replace("-", "")
+                # Hermes/Codex may derive prompt-cache identity from either the
+                # session id or session key, and Codex caps that value at 64 chars.
+                # Use compact task-scoped values for both fields.
+                session_id = f"a2a-{compact_task_id}"
+                session_key = f"a2a:{compact_task_id}"
             hermes_resp = _call_hermes(messages, session_id=session_id, session_key=session_key)
             findings_text = _extract_text(hermes_resp)
         except urllib.error.HTTPError as e:
