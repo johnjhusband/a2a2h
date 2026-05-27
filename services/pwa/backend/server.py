@@ -50,6 +50,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -78,9 +79,21 @@ HERMES_A2A_TOKEN = os.environ.get("HERMES_A2A_TOKEN", "")
 HERMES_SEND_TIMEOUT_S = int(os.environ.get("HERMES_SEND_TIMEOUT_S", "660"))
 
 OPENCLAW_MODEL = os.environ.get("OPENCLAW_MODEL", "openai-codex/gpt-5.5")
-# Stable session id keeps OpenClaw's prompt cache warm across PWA turns and preserves
-# conversation continuity. Single-user assumption; if multi-user comes, derive per user.
-OPENCLAW_SESSION_ID = os.environ.get("OPENCLAW_SESSION_ID", "pwa-john-main")
+# Daily-bounded session id keeps OpenClaw's prompt cache warm within a day while
+# preventing the PWA chat from accumulating multi-day context until model calls
+# time out. OPENCLAW_SESSION_ID is treated as a legacy/base hint; trailing
+# YYYYMMDD or YYYYMMDD-HHMM rotation suffixes are stripped before today's UTC day
+# is appended so old .env values cannot pin the live chat to a stale transcript.
+OPENCLAW_SESSION_ID_BASE = os.environ.get("OPENCLAW_SESSION_ID_BASE", "").strip()
+OPENCLAW_SESSION_ID_LEGACY = os.environ.get("OPENCLAW_SESSION_ID", "pwa-user").strip() or "pwa-user"
+if not OPENCLAW_SESSION_ID_BASE:
+    OPENCLAW_SESSION_ID_BASE = re.sub(r"-\d{8}(?:-\d{4})?$", "", OPENCLAW_SESSION_ID_LEGACY) or "pwa-user"
+
+
+def openclaw_session_id(now: Optional[datetime] = None) -> str:
+    """Return the current UTC-day-bounded PWA OpenClaw session id."""
+    current = now or datetime.now(timezone.utc)
+    return f"{OPENCLAW_SESSION_ID_BASE}-{current.strftime('%Y%m%d')}"
 # OpenClaw often has to inspect the A2A2H repo or delegate work. The PWA already
 # returns 202 immediately and delivers via SSE, so give the background worker a
 # long-task budget instead of killing real A2A2H work at the old interactive limit.
@@ -587,9 +600,9 @@ def _start_background_chat_job(*, target: str, message: str) -> tuple[bool, str,
                 env={
                     **os.environ,
                     "HOME": os.environ.get("HOME", "/home/a2a2h"),
-                    # Keep long jobs off the live PWA chat session so John can
+                    # Keep long jobs off the live PWA chat session so the user can
                     # continue short turns while a background run is active.
-                    "OPENCLAW_SESSION_ID": f"{OPENCLAW_SESSION_ID}-{job_id}",
+                    "OPENCLAW_SESSION_ID": f"{openclaw_session_id()}-{job_id}",
                 },
             )
         finally:
@@ -643,6 +656,14 @@ def send_to_hermes(
         if e.code == 504 or status == "timeout":
             error = f"Hermes is still working or timed out after {HERMES_SEND_TIMEOUT_S}s; please retry or ask for a smaller step."
             _log_pwa_a2a_response(task_id=task_id, sender="hermes", recipient=sender, payload={"status": "timeout", "error": error})
+            return {"ok": False, "error": error, "task_id": task_id}
+        if e.code in {401, 403}:
+            error = (
+                "Hermes A2A unauthorized: pwa-backend and hermes-a2a-sidecar "
+                "do not agree on HERMES_A2A_TOKEN, or one service has not been "
+                "restarted after the environment changed."
+            )
+            _log_pwa_a2a_response(task_id=task_id, sender="hermes", recipient=sender, payload={"status": "unauthorized", "error": error})
             return {"ok": False, "error": error, "task_id": task_id}
         detail = payload.get("error") if isinstance(payload, dict) else None
         error = detail or f"Hermes HTTP {e.code}"
@@ -711,10 +732,11 @@ def send_to_openclaw(text: str) -> dict:
     # "GatewayClientRequestError: provider/model overrides are not authorized
     # for this caller." The agent uses agents.defaults.model.primary from
     # openclaw.json (openai-codex/gpt-5.5) which is what we want anyway.
+    session_id = openclaw_session_id()
     cmd = [
         "openclaw", "agent",
         "--agent", "main",
-        "--session-id", OPENCLAW_SESSION_ID,
+        "--session-id", session_id,
         "--message", human_message,
         "--thinking", "off",
         "--json",
@@ -735,7 +757,7 @@ def send_to_openclaw(text: str) -> dict:
         payload = _extract_json_object(combined)
         if not payload:
             return {"ok": False, "error": f"openclaw returned no parseable JSON: {combined[-1000:]}"}
-        return {"ok": True, "reply": _extract_openclaw_reply(payload), "session_id": OPENCLAW_SESSION_ID}
+        return {"ok": True, "reply": _extract_openclaw_reply(payload), "session_id": session_id}
     except subprocess.TimeoutExpired:
         return {
             "ok": False,
@@ -1209,15 +1231,21 @@ class Handler(BaseHTTPRequestHandler):
                     append(sender="system", recipient="john", kind="system_event",
                            content=json.dumps({"event": "openclaw_send_timeout" if r.get("timeout") else "openclaw_send_failed", "error": r.get("error")}))
 
-            if target == "hermes":
-                deliver_hermes()
-            elif target == "both":
-                r = send_coordinated_both(msg)
-                if not r.get("ok"):
-                    append(sender="system", recipient="john", kind="system_event",
-                           content=json.dumps({"event": "coordinated_both_failed", "phase": r.get("phase"), "error": r.get("error")}))
-            else:  # openclaw or default
-                deliver_openclaw()
+            try:
+                if target == "hermes":
+                    deliver_hermes()
+                elif target == "both":
+                    r = send_coordinated_both(msg)
+                    if not r.get("ok"):
+                        append(sender="system", recipient="john", kind="system_event",
+                               content=json.dumps({"event": "coordinated_both_failed", "phase": r.get("phase"), "error": r.get("error")}))
+                else:  # openclaw or default
+                    deliver_openclaw()
+            except Exception as exc:
+                detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
+                sys.stderr.write(f"PWA chat worker crashed for target={target}: {detail}\n")
+                append(sender="system", recipient="john", kind="system_event",
+                       content=json.dumps({"event": "pwa_chat_worker_crashed", "target": target, "error": repr(exc)}))
 
         threading.Thread(target=worker, daemon=True).start()
         return self._json(202, {"accepted": True, "target": target})

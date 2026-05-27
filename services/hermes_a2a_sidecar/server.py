@@ -152,6 +152,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def _unauth(self):
+        append(sender="system", recipient="user", kind="system_event",
+               content=json.dumps({"event": "hermes_a2a_unauthorized", "path": self.path}))
         self._send_json(401, {"error": "unauthorized"})
 
     def _check_auth(self) -> bool:
