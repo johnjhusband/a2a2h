@@ -329,19 +329,23 @@ function pushSupportSnapshot(extra = {}) {
   return snapshot;
 }
 
+async function currentPushSubscriptionState(extra = {}) {
+  let subscribed = false;
+  if (("serviceWorker" in navigator) && ("PushManager" in window)) {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      subscribed = !!(await reg.pushManager.getSubscription());
+    } catch (e) { extra.subscription_check_error = e.message; }
+  }
+  return pushSupportSnapshot({ subscribed, status_text: $pushStatus ? $pushStatus.textContent : "", ...extra });
+}
+
 async function reportPushDeviceStatus(extra = {}) {
   if (!$reportPushStatus) return;
   try {
     $reportPushStatus.disabled = true;
     setPushStatus("Reporting this device's push readiness…");
-    let subscribed = false;
-    if (("serviceWorker" in navigator) && ("PushManager" in window)) {
-      try {
-        const reg = await navigator.serviceWorker.ready;
-        subscribed = !!(await reg.pushManager.getSubscription());
-      } catch (e) { extra.subscription_check_error = e.message; }
-    }
-    const payload = pushSupportSnapshot({ subscribed, status_text: $pushStatus ? $pushStatus.textContent : "", ...extra });
+    const payload = await currentPushSubscriptionState(extra);
     const r = await fetch("/api/push/device_status", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(payload),
     });
@@ -384,6 +388,27 @@ async function refreshAppShell() {
   }
 }
 if ($refreshApp) $refreshApp.addEventListener("click", refreshAppShell);
+
+async function autoReportDailyDeviceReadiness() {
+  // The phone is the only place we can observe browser Notification/Push/Voice
+  // support. Write one bounded sanitized readiness snapshot per UTC day when
+  // the authenticated PWA opens, so maintainers can verify device reality
+  // without requiring the user to remember the Report buttons.
+  const day = new Date().toISOString().slice(0, 10);
+  const key = "pwa-device-readiness-auto-report-day";
+  if (localStorage.getItem(key) === day) return;
+  localStorage.setItem(key, day);
+  try {
+    await fetch("/api/push/device_status", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(await currentPushSubscriptionState({ auto_daily: true })),
+    });
+  } catch (e) {}
+  try {
+    await fetch("/api/voice/device_status", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(voiceSupportSnapshot({ auto_daily: true })),
+    });
+  } catch (e) {}
+}
 
 function setupVoiceControls() {
   const speechOut = "speechSynthesis" in window;
@@ -469,7 +494,7 @@ function initToggle($el, name) {
 
 initToggle($toggleA2A, "a2a");
 setupVoiceControls();
-describePushCapability();
+describePushCapability().then(autoReportDailyDeviceReadiness);
 
 // Boot
 loadHistory().then(openStream);
