@@ -765,7 +765,7 @@ class Handler(BaseHTTPRequestHandler):
     # Routes
     # Paths served WITHOUT auth — the PWA shell must bootstrap before the JS
     # can attach the Bearer token. Static assets contain no secrets.
-    _PUBLIC_GET_EXACT = ("/", "/index.html", "/manifest.json", "/service-worker.js", "/api/health")
+    _PUBLIC_GET_EXACT = ("/", "/index.html", "/manifest.json", "/service-worker.js", "/reset", "/api/health")
     _PUBLIC_GET_PREFIX = ("/static/",)
 
     def _is_public_get(self, path: str) -> bool:
@@ -775,6 +775,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if self._maybe_bootstrap_session(path):
+            return
+        if path == "/reset":
+            body = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Resetting A2A2H PWA</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:system-ui,-apple-system,sans-serif;padding:2rem;background:#111;color:#eee;line-height:1.5}h2{margin-top:0}</style></head><body><h2>Resetting A2A2H PWA</h2><p id="s">Clearing cached service worker and storage&hellip;</p><script>(async()=>{try{if("serviceWorker" in navigator){const rs=await navigator.serviceWorker.getRegistrations();await Promise.all(rs.map(r=>r.unregister()));}if("caches" in window){const ks=await caches.keys();await Promise.all(ks.map(k=>caches.delete(k)));}document.getElementById("s").textContent="Done. Redirecting in a moment…";setTimeout(()=>location.replace("/"),700);}catch(e){document.getElementById("s").textContent="Reset error: "+(e&&e.message||e);}})();</script></body></html>'.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if path == "/api/health":
             return self._json(200, {"status": "ok", "service": "pwa-backend"})
