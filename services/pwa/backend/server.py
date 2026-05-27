@@ -115,11 +115,15 @@ PWA_PUSH_ENABLED = os.environ.get("PWA_PUSH_ENABLED", "1").lower() not in {"0", 
 
 PWA_JOB_PAYLOAD_DIR = Path(os.environ.get("PWA_JOB_PAYLOAD_DIR", "/opt/a2a2h/.cache/pwa-jobs/payloads"))
 PWA_JOB_RUNNER = Path(os.environ.get("PWA_JOB_RUNNER", str(Path(__file__).resolve().parent / "job_runner.py")))
+PWA_PENDING_WORKER_WARN_S = int(os.environ.get("PWA_PENDING_WORKER_WARN_S", "180"))
 A2A2H_ROOT = os.environ.get("A2A2H_ROOT", "/opt/a2a2h")
 A2A2H_INSTANCE_ID = os.environ.get("A2A2H_INSTANCE_ID", "production")
 CHAT_DB_PATH = os.environ.get("CHAT_DB", "/opt/a2a2h/chat.db")
 PWA_CHAT_LOG_DIR = Path(os.environ.get("PWA_CHAT_LOG_DIR", "/opt/a2a2h/logs/pwa-chat"))
 CHAT_LOG_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+_ACTIVE_CHAT_WORKERS: dict[str, dict[str, Any]] = {}
+_ACTIVE_CHAT_WORKERS_LOCK = threading.Lock()
 
 
 def _clone_chat_isolation_error(*, instance_id: str, chat_db: str, a2a2h_root: str) -> str | None:
@@ -290,6 +294,47 @@ class SSEBroadcaster:
             time.sleep(0.5)
 
 BROADCASTER = SSEBroadcaster()
+
+
+def _record_active_chat_worker(worker_id: str, *, target: str) -> None:
+    with _ACTIVE_CHAT_WORKERS_LOCK:
+        _ACTIVE_CHAT_WORKERS[worker_id] = {"target": target, "started": time.time(), "warned": False}
+
+
+def _clear_active_chat_worker(worker_id: str) -> None:
+    with _ACTIVE_CHAT_WORKERS_LOCK:
+        _ACTIVE_CHAT_WORKERS.pop(worker_id, None)
+
+
+def _emit_stale_chat_worker_events(now: Optional[float] = None) -> int:
+    current = now if now is not None else time.time()
+    stale: list[tuple[str, dict[str, Any], int]] = []
+    with _ACTIVE_CHAT_WORKERS_LOCK:
+        for worker_id, info in _ACTIVE_CHAT_WORKERS.items():
+            age_s = int(current - float(info.get("started") or current))
+            if not info.get("warned") and age_s >= PWA_PENDING_WORKER_WARN_S:
+                info["warned"] = True
+                stale.append((worker_id, dict(info), age_s))
+    for worker_id, info, age_s in stale:
+        append(sender="system", recipient="john", kind="system_event", correlation=worker_id,
+               content=json.dumps({
+                   "event": "pwa_chat_worker_stuck",
+                   "worker_id": worker_id,
+                   "target": info.get("target"),
+                   "age_s": age_s,
+                   "warn_after_s": PWA_PENDING_WORKER_WARN_S,
+               }))
+    return len(stale)
+
+
+def _pending_chat_worker_watchdog_loop() -> None:
+    """Surface stuck in-process PWA workers as visible chat events."""
+    while True:
+        time.sleep(max(5, min(30, PWA_PENDING_WORKER_WARN_S // 2 or 5)))
+        _emit_stale_chat_worker_events()
+
+
+threading.Thread(target=_pending_chat_worker_watchdog_loop, daemon=True).start()
 
 # ─── Routing logic ──────────────────────────────────────────────────────────
 
@@ -1212,6 +1257,8 @@ class Handler(BaseHTTPRequestHandler):
             # Fall through to the in-process worker if detached start fails.
 
         # Spawn worker so we can return 202 immediately and let SSE deliver the reply
+        worker_id = f"pwa-worker-{uuid.uuid4().hex[:12]}"
+        _record_active_chat_worker(worker_id, target=target)
         def worker():
             def deliver_hermes():
                 r = send_to_hermes(msg)
@@ -1245,10 +1292,13 @@ class Handler(BaseHTTPRequestHandler):
                 detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:]
                 sys.stderr.write(f"PWA chat worker crashed for target={target}: {detail}\n")
                 append(sender="system", recipient="john", kind="system_event",
-                       content=json.dumps({"event": "pwa_chat_worker_crashed", "target": target, "error": repr(exc)}))
+                       correlation=worker_id,
+                       content=json.dumps({"event": "pwa_chat_worker_crashed", "worker_id": worker_id, "target": target, "error": repr(exc)}))
+            finally:
+                _clear_active_chat_worker(worker_id)
 
         threading.Thread(target=worker, daemon=True).start()
-        return self._json(202, {"accepted": True, "target": target})
+        return self._json(202, {"accepted": True, "target": target, "worker_id": worker_id})
 
     def _sse_stream(self):
         self.send_response(200)
