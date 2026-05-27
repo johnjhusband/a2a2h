@@ -69,6 +69,7 @@ from chat.db import append, tail, log_a2a_request, log_a2a_response, clone_chat_
 PORT = int(os.environ.get("PWA_PORT", "8088"))
 BIND = os.environ.get("PWA_BIND", "127.0.0.1")  # Caddy reverse-proxies to this
 PWA_AUTH_TOKEN = os.environ.get("PWA_AUTH_TOKEN", "")
+PWA_ALLOW_DEV_NO_AUTH = os.environ.get("PWA_ALLOW_DEV_NO_AUTH", "").lower() in {"1", "true", "yes"}
 FRONTEND_DIR = Path(os.environ.get("PWA_FRONTEND", str(Path(__file__).resolve().parent.parent / "frontend")))
 
 HERMES_A2A_URL = os.environ.get("HERMES_A2A_URL", "http://127.0.0.1:8643/a2a/")
@@ -118,6 +119,25 @@ def _assert_clone_chat_isolation() -> None:
 
 
 _assert_clone_chat_isolation()
+
+
+def _pwa_auth_dev_mode_allowed() -> bool:
+    """Return whether the PWA may run without an auth token.
+
+    Production must fail closed if token rotation or env editing leaves
+    PWA_AUTH_TOKEN blank. Non-production test/candidate instances can still
+    run without auth unless production-like behavior is explicitly requested.
+    """
+    instance = (A2A2H_INSTANCE_ID or "production").strip().lower()
+    return PWA_ALLOW_DEV_NO_AUTH or instance not in {"production", "prod"}
+
+
+def _pwa_auth_startup_error() -> str | None:
+    if PWA_AUTH_TOKEN:
+        return None
+    if _pwa_auth_dev_mode_allowed():
+        return None
+    return "PWA_AUTH_TOKEN is required for production PWA backend startup"
 
 LONG_JOB_RE = re.compile(
     r"\b(implement|build|create|add|wire|install|upgrade|deploy|research|audit|investigate|diagnos(?:e|is)|debug|fix|repair|patch|refactor|run\s+tests?|test|document|analy[sz]e|background|long[-\s]?running|report\s+back|when\s+(you('|’)re|you\s+are)\s+done)\b",
@@ -829,7 +849,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth_ok(self) -> bool:
         if not PWA_AUTH_TOKEN:
-            return True  # auth disabled (dev mode)
+            return _pwa_auth_dev_mode_allowed()
         return self._valid_session_value(self._cookie_value(self.SESSION_COOKIE_NAME))
 
     def _maybe_bootstrap_session(self, path: str) -> bool:
@@ -1116,8 +1136,12 @@ def main() -> None:
     if isolation_error:
         sys.stderr.write(f"FATAL: {isolation_error}\n")
         sys.exit(2)
+    auth_error = _pwa_auth_startup_error()
+    if auth_error:
+        sys.stderr.write(f"FATAL: {auth_error}\n")
+        sys.exit(2)
     if not PWA_AUTH_TOKEN:
-        sys.stderr.write("WARN: PWA_AUTH_TOKEN not set — running without auth (dev only)\n")
+        sys.stderr.write("WARN: PWA_AUTH_TOKEN not set — running without auth for non-production/dev instance only\n")
     append(sender="system", kind="system_event",
            content=f"pwa-backend starting on {BIND}:{PORT}")
     server = ThreadingHTTPServer((BIND, PORT), Handler)
