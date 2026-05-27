@@ -10,6 +10,7 @@ const $composer = document.getElementById("composer");
 const $input = document.getElementById("input");
 const $enablePush = document.getElementById("enable-push");
 const $pushStatus = document.getElementById("push-status");
+const $pushHelp = document.getElementById("push-help");
 const $reportPushStatus = document.getElementById("report-push-status");
 const $voiceToggle = document.getElementById("voice-toggle");
 const $voiceInput = document.getElementById("voice-input");
@@ -26,10 +27,22 @@ function setStatus(text, isError = false) {
   $status.classList.toggle("warn", isError);
 }
 
-function setPushStatus(text, isError = false) {
+function setPushStatus(text, isError = false, help = "") {
   if (!$pushStatus) return;
   $pushStatus.textContent = text;
   $pushStatus.classList.toggle("warn", isError);
+  if ($pushHelp) $pushHelp.textContent = help || "If this says unsupported, install/open the PWA from the phone app icon and tap Report status.";
+}
+
+function pushHelpText(state) {
+  return ({
+    unsupported_notifications: "This browser cannot show web notifications. Try the installed PWA from a mobile browser that supports notifications.",
+    unsupported_push: "Web Push is unavailable here. On iPhone/iPad, add A2A2H to Home Screen and open it from the installed app icon before testing.",
+    permission_denied: "Notifications are blocked for this site. Re-enable them in browser/site settings, then return and tap Enable/Test.",
+    default: "Tap Enable/Test on the phone PWA, accept notification permission, then tap Report status if it still does not alert.",
+    ready: "This device is subscribed. Tap Enable/Test to send a live provider test, then confirm whether the notification appears.",
+    subscribed: "Subscribed and provider test submitted. If no notification appears, leave this status visible and tap Report status so A2A2H can inspect it.",
+  })[state] || "If this says unsupported, install/open the PWA from the phone app icon and tap Report status.";
 }
 
 function senderLabel(s) {
@@ -217,26 +230,26 @@ if ("serviceWorker" in navigator) {
 async function describePushCapability() {
   if (!$pushStatus) return;
   try {
-    if (!("Notification" in window)) { setPushStatus("Notifications are not supported in this browser", true); return; }
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) { setPushStatus("Web Push is not supported in this browser", true); return; }
+    if (!("Notification" in window)) { setPushStatus("Notifications are not supported in this browser", true, pushHelpText("unsupported_notifications")); return; }
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) { setPushStatus("Web Push is not supported in this browser", true, pushHelpText("unsupported_push")); return; }
     const perm = Notification.permission || "default";
     const reg = await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.getSubscription();
-    if (perm === "granted" && sub) setPushStatus("Ready: this device is subscribed; tap to send a test notification.");
-    else if (perm === "granted") setPushStatus("Permission granted; tap to subscribe and send a test.");
-    else if (perm === "denied") setPushStatus("Permission denied by this browser/device", true);
-    else setPushStatus("Not enabled on this device yet; tap Enable/Test.");
+    if (perm === "granted" && sub) setPushStatus("Ready: this device is subscribed; tap to send a test notification.", false, pushHelpText("ready"));
+    else if (perm === "granted") setPushStatus("Permission granted; tap to subscribe and send a test.", false, pushHelpText("default"));
+    else if (perm === "denied") setPushStatus("Permission denied by this browser/device", true, pushHelpText("permission_denied"));
+    else setPushStatus("Not enabled on this device yet; tap Enable/Test.", false, pushHelpText("default"));
   } catch (e) { setPushStatus("Push readiness check failed: " + e.message, true); }
 }
 
 async function enablePush() {
   try {
     if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
-      setStatus("push not supported in this browser", true); setPushStatus("Push unsupported here", true); return;
+      setStatus("push not supported in this browser", true); setPushStatus("Push unsupported here", true, pushHelpText("unsupported_push")); return;
     }
     setStatus("checking push…"); setPushStatus("Requesting notification permission…");
     const perm = await Notification.requestPermission();
-    if (perm !== "granted") { setStatus("push permission denied", true); setPushStatus("Permission was not granted", true); return; }
+    if (perm !== "granted") { setStatus("push permission denied", true); setPushStatus("Permission was not granted", true, pushHelpText("permission_denied")); return; }
     const reg = await navigator.serviceWorker.ready;
     const vapidResp = await fetch("/api/push/vapid_public_key", { headers: authHeaders() });
     const { public_key } = await vapidResp.json();
@@ -254,7 +267,7 @@ async function enablePush() {
     const testResp = await fetch("/api/push/test", { method: "POST", headers: authHeaders(), body: "{}" });
     if (!testResp.ok) { setStatus(`push test failed: ${testResp.status}`, true); setPushStatus(`Test failed: HTTP ${testResp.status}`, true); return; }
     const test = await testResp.json();
-    if (test.attempted > 0 && test.failed === 0) { setStatus("push test sent — watch for the notification"); setPushStatus("Test sent successfully; watch this device for the notification."); reportPushDeviceStatus({ test_attempted: test.attempted, test_failed: test.failed, after_test: true }); }
+    if (test.attempted > 0 && test.failed === 0) { setStatus("push test sent — watch for the notification"); setPushStatus("Test sent successfully; watch this device for the notification.", false, pushHelpText("subscribed")); reportPushDeviceStatus({ test_attempted: test.attempted, test_failed: test.failed, after_test: true }); }
     else if (test.attempted > 0) { setStatus(`push test attempted with ${test.failed} failure(s)`, true); setPushStatus(`Provider attempted delivery with ${test.failed} failure(s)`, true); }
     else { setStatus("push subscribed, but server did not attempt delivery", true); setPushStatus("Subscribed, but server did not attempt delivery", true); }
   } catch (e) { setStatus("push enable failed: " + e.message, true); setPushStatus("Push enable failed: " + e.message, true); }
