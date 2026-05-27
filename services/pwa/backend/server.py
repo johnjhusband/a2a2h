@@ -935,6 +935,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/stream" and self._query_param("token"):
             self.send_response(204)
             self.send_header("Cache-Control", "no-store")
+            # Some mobile PWA clients keep retrying stale EventSource URLs even
+            # after 204. Clearing only browser caches helps retire the old shell
+            # without touching cookies, storage, or server-side state.
+            self.send_header("Clear-Site-Data", '"cache"')
             self.end_headers()
             return
         # Public paths skip auth; API paths still require it
