@@ -33,6 +33,21 @@ function tsLabel(ts) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function summarizeText(value, max = 280) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, max - 1).trimEnd() + "…" : text;
+}
+
+function a2aSummary(m) {
+  let payload = {};
+  try { payload = JSON.parse(m.content || "{}"); } catch (e) {}
+  const capability = payload.capability || payload.task || payload.task_id || "agent coordination";
+  const findings = payload.findings || payload.summary || payload.result || payload.error || payload.status || payload.success_criteria || "coordination event recorded";
+  let raw = m.content || "";
+  try { raw = JSON.stringify(payload, null, 2); } catch (e) {}
+  return { capability: summarizeText(capability, 160), findings: summarizeText(findings, 360), raw };
+}
+
 function appendMessage(m) {
   // a2a_* rows (JSON envelopes for agent-to-agent traffic) are rendered into the DOM
   // but hidden by CSS unless the user enables the A2A toggle in the topbar.
@@ -63,12 +78,28 @@ function appendMessage(m) {
 
   const content = document.createElement("div");
   content.className = "msg-content";
-  // For a2a_request/response, pretty-print the JSON; for chat, plain text
-  let body = m.content;
   if (m.kind && m.kind.startsWith("a2a_")) {
-    try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {}
+    const summary = a2aSummary(m);
+    const capability = document.createElement("div");
+    capability.className = "a2a-capability";
+    capability.textContent = "Capability: " + summary.capability;
+    const findings = document.createElement("div");
+    findings.className = "a2a-findings";
+    findings.textContent = summary.findings;
+    const raw = document.createElement("details");
+    raw.className = "a2a-raw";
+    const rawLabel = document.createElement("summary");
+    rawLabel.textContent = "Raw JSON";
+    const pre = document.createElement("pre");
+    pre.textContent = summary.raw;
+    raw.appendChild(rawLabel);
+    raw.appendChild(pre);
+    content.appendChild(capability);
+    content.appendChild(findings);
+    content.appendChild(raw);
+  } else {
+    content.textContent = m.content;
   }
-  content.textContent = body;
 
   el.appendChild(meta);
   el.appendChild(content);
@@ -182,12 +213,9 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("focus", () => loadHistory({ replace: true }));
 
 // ─── Toggles ─────────────────────────────────────────────────────────────
-// Two independent body classes drive visibility (style.css does the hiding):
-//   .show-a2a   — render a2a_request / a2a_response rows at all
-//   .show-json  — within visible a2a rows, also render the JSON body
-// State persists in localStorage so the user's preference survives reloads.
+// The coordination toggle adds .show-a2a to the body. A2A rows stay hidden by
+// default; when shown, each row includes a short summary plus collapsible JSON.
 const $toggleA2A = document.getElementById("toggle-a2a");
-const $toggleJSON = document.getElementById("toggle-json");
 
 function applyToggle(name, on) {
   document.body.classList.toggle("show-" + name, on);
@@ -202,7 +230,6 @@ function initToggle($el, name) {
 }
 
 initToggle($toggleA2A, "a2a");
-initToggle($toggleJSON, "json");
 
 // Boot
 loadHistory().then(openStream);
