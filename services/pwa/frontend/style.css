@@ -95,6 +95,29 @@ body { display: flex; flex-direction: column; }
 .feature-summary strong { color: var(--fg); }
 .feature-summary a { color: var(--accent); font-weight: 800; text-decoration: none; }
 .feature-summary a:hover { text-decoration: underline; }
+.app-version {
+  color: #ffd479 !important;
+  font-weight: 800;
+}
+.release-notes {
+  flex-basis: 100%;
+  border: 1px solid rgba(95, 168, 255, 0.22);
+  border-radius: 10px;
+  padding: 0.45rem 0.6rem;
+  background: rgba(95, 168, 255, 0.08);
+}
+.release-notes summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 800;
+}
+.release-notes ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1.1rem;
+}
+.release-notes li {
+  margin: 0.2rem 0;
+}
 .feature-card button, .feature-link {
   justify-self: start;
   background: var(--accent); color: #000; border: none;
