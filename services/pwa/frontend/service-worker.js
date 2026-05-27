@@ -3,8 +3,9 @@
 // Bump SHELL_CACHE when shipping any change to index.html / app.js / style.css.
 // The activate handler deletes any cache != current, so the bump is the only
 // thing the user needs for an update to take effect on next page load.
-const SHELL_CACHE = "a2a2h-shell-v11";
+const SHELL_CACHE = "a2a2h-shell-v12";
 const SHELL_FILES = ["/", "/index.html", "/static/app.js", "/static/style.css", "/manifest.json", "/static/icon-192.png", "/static/icon-512.png"];
+const SHELL_PATHS = new Set(SHELL_FILES);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -24,18 +25,31 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  // Network-first for API; cache-first for static shell
-  if (url.pathname.startsWith("/api/")) {
+  // API/chat-log/export routes are always network-only so private data and
+  // history never come from a stale cache.
+  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/chat-log/")) {
     event.respondWith(fetch(event.request));
     return;
   }
+
+  // The visible PWA shell must update quickly on installed PWAs. Use
+  // network-first for shell files instead of cache-first, then refresh the cache
+  // from the successful response. This prevents old cached HTML/JS from hiding
+  // newly shipped feature-request UI until a manual cache purge.
+  const isShellRequest = event.request.mode === "navigate" || SHELL_PATHS.has(url.pathname);
+  if (isShellRequest) {
+    event.respondWith(
+      fetch(event.request).then((resp) => {
+        const copy = resp.clone();
+        caches.open(SHELL_CACHE).then((c) => c.put(event.request, copy)).catch(() => {});
+        return resp;
+      }).catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
   event.respondWith(
-    caches.match(event.request).then((hit) => hit || fetch(event.request).then((resp) => {
-      // Cache successful shell fetches opportunistically
-      const copy = resp.clone();
-      caches.open(SHELL_CACHE).then((c) => c.put(event.request, copy)).catch(() => {});
-      return resp;
-    }))
+    caches.match(event.request).then((hit) => hit || fetch(event.request))
   );
 });
 
