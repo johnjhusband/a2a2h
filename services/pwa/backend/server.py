@@ -37,7 +37,10 @@ gracefully degrades to no-push).
 """
 from __future__ import annotations
 import ast
+import base64
+import hashlib
 import hmac
+import html
 import json
 import os
 import queue
@@ -579,6 +582,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     SESSION_COOKIE_NAME = "a2a2h_pwa_session"
+    SESSION_TTL_SECONDS = int(os.environ.get("PWA_SESSION_TTL_SECONDS", str(12 * 60 * 60)))
 
     def _cookie_value(self, name: str) -> str:
         raw = self.headers.get("Cookie", "")
@@ -595,17 +599,80 @@ class Handler(BaseHTTPRequestHandler):
         values = urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get(name, [])
         return values[0] if values else ""
 
+    @classmethod
+    def _session_signature(cls, issued_at: int) -> str:
+        msg = f"a2a2h-pwa-session:{issued_at}".encode("utf-8")
+        digest = hmac.new(PWA_AUTH_TOKEN.encode("utf-8"), msg, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+    @classmethod
+    def _make_session_value(cls, now: int | None = None) -> str:
+        issued_at = int(now or time.time())
+        return f"v1:{issued_at}:{cls._session_signature(issued_at)}"
+
+    @classmethod
+    def _valid_session_value(cls, value: str, now: int | None = None) -> bool:
+        if not PWA_AUTH_TOKEN or not value:
+            return False
+        parts = value.split(":", 2)
+        if len(parts) != 3 or parts[0] != "v1":
+            return False
+        try:
+            issued_at = int(parts[1])
+        except ValueError:
+            return False
+        current = int(now or time.time())
+        if issued_at > current + 60 or current - issued_at > cls.SESSION_TTL_SECONDS:
+            return False
+        return hmac.compare_digest(parts[2], cls._session_signature(issued_at))
+
     def _session_cookie_header(self) -> str:
         return (
-            f"{self.SESSION_COOKIE_NAME}={urllib.parse.quote(PWA_AUTH_TOKEN, safe='')}; "
-            "Path=/; HttpOnly; Secure; SameSite=Strict"
+            f"{self.SESSION_COOKIE_NAME}={urllib.parse.quote(self._make_session_value(), safe='')}; "
+            f"Path=/; Max-Age={self.SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=Strict"
         )
+
+    def _login_page(self, message: str = ""):
+        warning = f'<p class="warn">{html.escape(message)}</p>' if message else ""
+        body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>A2A2H login</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login">
+  <main class="login-card">
+    <h1>A2A2H</h1>
+    <p>This control room requires a private browser session.</p>
+    {warning}
+    <form method="post" action="/api/login" autocomplete="off">
+      <label for="token">Access token</label>
+      <input id="token" name="token" type="password" autofocus required />
+      <button type="submit">Start session</button>
+    </form>
+  </main>
+</body>
+</html>""".encode("utf-8")
+        self.send_response(401)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _start_browser_session(self):
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", self._session_cookie_header())
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _auth_ok(self) -> bool:
         if not PWA_AUTH_TOKEN:
             return True  # auth disabled (dev mode)
-        cookie_token = self._cookie_value(self.SESSION_COOKIE_NAME)
-        return bool(cookie_token) and hmac.compare_digest(cookie_token, PWA_AUTH_TOKEN)
+        return self._valid_session_value(self._cookie_value(self.SESSION_COOKIE_NAME))
 
     def _maybe_bootstrap_session(self, path: str) -> bool:
         """Exchange ?token= for a session cookie only on PWA shell routes."""
@@ -646,6 +713,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"status": "ok", "service": "pwa-backend"})
         # Public paths skip auth; API paths still require it
         if not self._is_public_get(path) and not self._auth_ok():
+            if path == "/" or path == "/index.html":
+                return self._login_page()
             return self._json(401, {"error": "unauthorized"})
         if path == "/api/messages":
             qs = self.path.split("?", 1)[-1] if "?" in self.path else ""
@@ -679,11 +748,26 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": "not_found"})
 
     def do_POST(self):
-        if not self._auth_ok():
-            return self._json(401, {"error": "unauthorized"})
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+
+        if path == "/api/login":
+            content_type = self.headers.get("Content-Type", "")
+            if "application/json" in content_type:
+                try:
+                    body = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    return self._json(400, {"error": "invalid_json"})
+                supplied = str(body.get("token") or "")
+            else:
+                supplied = (urllib.parse.parse_qs(raw).get("token") or [""])[0]
+            if PWA_AUTH_TOKEN and hmac.compare_digest(supplied, PWA_AUTH_TOKEN):
+                return self._start_browser_session()
+            return self._login_page("Invalid access token.")
+
+        if not self._auth_ok():
+            return self._json(401, {"error": "unauthorized"})
         try:
             body = json.loads(raw) if raw else {}
         except json.JSONDecodeError:

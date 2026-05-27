@@ -97,3 +97,32 @@ body:not(.show-json) .msg.a2a .msg-content { display: none; }
   cursor: pointer;
 }
 .warn { color: var(--warn); }
+
+body.login {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: #0a0a0a;
+}
+
+.login-card {
+  width: min(92vw, 28rem);
+  border: 1px solid #2a2a2a;
+  border-radius: 18px;
+  padding: 2rem;
+  background: #111;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.login-card form {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.login-card input {
+  border: 1px solid #333;
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  background: #050505;
+  color: #f4f4f4;
+}
